@@ -48,6 +48,9 @@ func (a *App) installNode(ctx context.Context, c *Component, opt ComponentOption
 	tarPath := filepath.Join(cache, archive)
 	sumPath := filepath.Join(cache, "SHASUMS256.txt")
 	base := "https://nodejs.org/dist/" + version + "/"
+	if a.Network.UseMirrors {
+		base = strings.TrimRight(a.Network.normalized().NodeMirror, "/") + "/" + version + "/"
+	}
 	if err = a.componentDownload(ctx, base+archive, tarPath); err != nil {
 		return err
 	}
@@ -125,8 +128,16 @@ func (a *App) installConda(ctx context.Context, c *Component, opt ComponentOptio
 		return errors.New("invalid Miniconda version")
 	}
 	installer := filepath.Join(a.P.Data, "cache", "Miniconda3-"+version+"-"+platform+"-"+arch+".sh")
-	if err = a.componentDownload(ctx, "https://repo.anaconda.com/miniconda/"+filepath.Base(installer), installer); err != nil {
+	base := "https://repo.anaconda.com/miniconda"
+	if a.Network.UseMirrors {
+		base = strings.TrimRight(a.Network.normalized().CondaMirror, "/")
+	}
+	if err = a.componentDownload(ctx, base+"/"+filepath.Base(installer), installer); err != nil {
 		return err
+	}
+	header := readPrefix(installer, 4096)
+	if !(strings.HasPrefix(header, "#!/bin/sh") || strings.HasPrefix(header, "#!/bin/bash")) || !strings.Contains(header, "constructor") {
+		return errors.New("Miniconda 下载内容不是有效安装脚本（镜像可能返回网页）；请更换镜像源")
 	}
 	prefix := filepath.Join(c.Path, "runtime")
 	installerHome, err := os.MkdirTemp(filepath.Join(a.P.Data, "tmp"), "conda-installer-")
@@ -134,7 +145,7 @@ func (a *App) installConda(ctx context.Context, c *Component, opt ComponentOptio
 		return err
 	}
 	defer os.RemoveAll(installerHome)
-	if _, err = a.componentRun(ctx, map[string]string{"HOME": installerHome, "BASH_ENV": "", "ENV": "", "CONDA_PKGS_DIRS": filepath.Join(a.P.Data, "cache", "conda")}, "bash", installer, "-b", "-p", prefix); err != nil {
+	if _, err = a.installRun(ctx, map[string]string{"HOME": installerHome, "BASH_ENV": "", "ENV": "", "CONDA_PKGS_DIRS": filepath.Join(a.P.Data, "cache", "conda")}, "bash", installer, "-b", "-p", prefix); err != nil {
 		return err
 	}
 	b, err := a.componentRun(ctx, nil, filepath.Join(prefix, "bin", "conda"), "--version")
@@ -155,6 +166,9 @@ func (a *App) installCodex(ctx context.Context, c *Component, version string) er
 		return errors.New("Codex requires a fixed version")
 	}
 	version = strings.TrimPrefix(version, "v")
+	if a.Network.UseMirrors {
+		return a.installCodexFromRegistry(ctx, c, version)
+	}
 	script := filepath.Join(a.P.Data, "cache", "codex-install.sh")
 	if err := a.componentDownload(ctx, "https://chatgpt.com/codex/install.sh", script); err != nil {
 		return err
@@ -172,7 +186,7 @@ func (a *App) installCodex(ctx context.Context, c *Component, version string) er
 		}
 	}
 	env := map[string]string{"HOME": home, "CODEX_HOME": codeHome, "CODEX_INSTALL_DIR": bin, "CODEX_NON_INTERACTIVE": "1", "CODEX_RELEASE": version, "CODEX_INSTALL_DAEMON_ONLY": "0", "CODEX_INSTALL_DEFER_SELECTION": "0", "CODEX_INSTALL_IF_LATEST": "0", "CODEX_INSTALL_IF_CURRENT": "0", "BASH_ENV": "", "ENV": "", "PATH": bin + string(os.PathListSeparator) + os.Getenv("PATH")}
-	if _, err := a.componentRun(ctx, env, "sh", script, "--release", version); err != nil {
+	if _, err := a.installRun(ctx, env, "sh", script, "--release", version); err != nil {
 		return err
 	}
 	b, err := a.componentRun(ctx, env, filepath.Join(bin, "codex"), "--version")

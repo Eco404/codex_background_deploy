@@ -93,6 +93,10 @@ func (a *App) configureCodexApp(ctx context.Context, c *Component, opt Component
 		return err
 	}
 	root := a.codexappRuntime(c)
+	password, err := codexAppPassword(opt.PasswordFile, filepath.Join(root, "password"))
+	if err != nil {
+		return err
+	}
 	if c.Ownership == "reused" && c.Options["managed_runtime"] != "true" {
 		if _, e := os.Lstat(root); e == nil {
 			return errors.New("private CodexApp metadata directory already exists without ownership")
@@ -104,22 +108,6 @@ func (a *App) configureCodexApp(ctx context.Context, c *Component, opt Component
 		c.Status = "configured"
 		if err := a.Save(); err != nil {
 			return err
-		}
-	}
-	if opt.PasswordFile == "" {
-		if _, e := os.Stat(filepath.Join(root, "password")); e != nil {
-			return errors.New("configure CodexApp requires --password-file")
-		}
-	}
-	var password []byte
-	var err error
-	if opt.PasswordFile != "" {
-		password, err = os.ReadFile(opt.PasswordFile)
-		if err != nil {
-			return err
-		}
-		if strings.TrimSpace(string(password)) == "" {
-			return errors.New("empty CodexApp password")
 		}
 	}
 	portText := opt.Port
@@ -157,10 +145,8 @@ func (a *App) configureCodexApp(ctx context.Context, c *Component, opt Component
 	if err = componentPortFree(port); err != nil {
 		return fmt.Errorf("CodexApp port already in use; external processes will not be stopped: %w", err)
 	}
-	if password != nil {
-		if err = AtomicWrite(filepath.Join(root, "password"), password, 0600); err != nil {
-			return err
-		}
+	if err = AtomicWrite(filepath.Join(root, "password"), password, 0600); err != nil {
+		return err
 	}
 	c.Options["node"] = node
 	c.Options["port"] = strconv.Itoa(port)

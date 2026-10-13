@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -16,6 +17,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
 
 //go:embed branding/*
@@ -56,16 +59,47 @@ func (a *App) componentEnv(extra map[string]string) []string {
 	return env
 }
 func (a *App) componentRun(ctx context.Context, env map[string]string, name string, args ...string) ([]byte, error) {
+	return a.componentRunOutput(ctx, env, false, name, args...)
+}
+func (a *App) componentRunOutput(ctx context.Context, env map[string]string, stream bool, name string, args ...string) ([]byte, error) {
 	e := a.componentEnv(env)
+	a.progress("执行 %s…", filepath.Base(name))
 	if a.RunCommand != nil {
 		return a.RunCommand(ctx, name, args, e)
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = e
-	b, err := cmd.CombinedOutput()
-	if err != nil {
-		return b, fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(string(b)))
+	// Cancelling a shell/npm installer must also stop its download/extraction
+	// children; otherwise they can mutate files after rollback or hold pipes open.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
 	}
+	cmd.WaitDelay = 2 * time.Second
+	var b []byte
+	var err error
+	if stream {
+		var buffer bytes.Buffer
+		lines := &installOutput{a: a}
+		cmd.Stdout = io.MultiWriter(&buffer, lines)
+		cmd.Stderr = cmd.Stdout
+		err = cmd.Run()
+		lines.flush()
+		b = buffer.Bytes()
+	} else {
+		b, err = cmd.CombinedOutput()
+	}
+	if err != nil {
+		return b, fmt.Errorf("%s: %w: %s", name, err, a.Network.redact(strings.TrimSpace(string(b))))
+	}
+	a.progress("完成 %s", filepath.Base(name))
 	return b, nil
 }
 func (a *App) componentDirs() error {
@@ -87,8 +121,7 @@ func (a *App) componentFile(c *Component, path string, b []byte, mode os.FileMod
 	return a.Save()
 }
 func (a *App) componentDownload(ctx context.Context, url, path string) error {
-	_, err := a.componentRun(ctx, nil, "curl", "--fail", "--location", "--retry", "2", "--connect-timeout", "15", "--max-time", "600", url, "--output", path)
-	return err
+	return a.download(ctx, url, path)
 }
 func (a *App) ComponentAction(ctx context.Context, action, name string, opt ComponentOptions) error {
 	switch name {
@@ -115,6 +148,9 @@ func (a *App) ComponentAction(ctx context.Context, action, name string, opt Comp
 	}
 	if !opt.Yes {
 		return errors.New("component mutation requires explicit confirmation (--yes)")
+	}
+	if err := a.Network.Validate(); err != nil {
+		return err
 	}
 	switch action {
 	case "start":
@@ -176,6 +212,11 @@ func (a *App) ComponentAction(ctx context.Context, action, name string, opt Comp
 				opt.Path = candidate.Path
 				return a.reuseComponent(ctx, name, opt)
 			}
+		}
+	}
+	if name == "codexapp" {
+		if err := a.requireCodexAppCore(ctx); err != nil {
+			return err
 		}
 	}
 	if err := a.componentDirs(); err != nil {
@@ -268,7 +309,7 @@ func (a *App) reuseComponent(ctx context.Context, name string, opt ComponentOpti
 	if err = a.Save(); err != nil {
 		return err
 	}
-	if name == "codexapp" && opt.PasswordFile != "" {
+	if name == "codexapp" && (opt.PasswordFile != "" || opt.Configure) {
 		return a.configureCodexApp(ctx, c, opt)
 	}
 	if opt.ShellIntegration && (name == "node" || name == "miniconda") {
@@ -277,6 +318,11 @@ func (a *App) reuseComponent(ctx context.Context, name string, opt ComponentOpti
 	return nil
 }
 func (a *App) InstallManagedCodex(ctx context.Context, version string) (Candidate, error) {
+	if c := a.S.Components["codex-cli"]; c != nil && c.Ownership == "managed" && c.Status == "installed" {
+		if err := a.verifyManagedCodexSelection(ctx, c); err != nil {
+			return Candidate{}, err
+		}
+	}
 	if c := a.S.Components["codex-cli"]; c != nil && c.Ownership == "managed" && c.Status == "installed" && version != "" && strings.TrimPrefix(version, "v") != c.Version {
 		// The official installer keeps immutable release directories and switches
 		// symlinks. Capture our narrow selection points so failure restores the
@@ -321,6 +367,12 @@ func (a *App) InstallManagedCodex(ctx context.Context, version string) (Candidat
 	c := a.S.Components["codex-cli"]
 	p := c.Path
 	if c.Ownership == "managed" {
+		// A core rollback may restore its pinned State.Codex while a later CLI
+		// selection link still points to a different release. Do not mislabel or
+		// archive anything until the actual selected executable matches the record.
+		if err := a.verifyManagedCodexSelection(ctx, c); err != nil {
+			return Candidate{}, err
+		}
 		if err := a.archiveOldCodexPackages(c); err != nil {
 			return Candidate{}, err
 		}
@@ -334,6 +386,25 @@ func (a *App) InstallManagedCodex(ctx context.Context, version string) (Candidat
 		source = "reused"
 	}
 	return Candidate{Kind: "codex", Path: p, Version: c.Version, Source: source, Compatible: true}, nil
+}
+
+func (a *App) verifyManagedCodexSelection(ctx context.Context, c *Component) error {
+	if err := a.EnsureData(); err != nil {
+		return err
+	}
+	validationHome, err := os.MkdirTemp(filepath.Join(a.P.Data, "tmp"), "codex-selection-check-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(validationHome)
+	output, err := a.componentRun(ctx, map[string]string{"HOME": validationHome, "CODEX_HOME": validationHome}, filepath.Join(c.Path, "bin", "codex"), "--version")
+	if err != nil {
+		return fmt.Errorf("managed Codex selection cannot be verified; inspect recorded runtime and recover pending operations: %w", err)
+	}
+	if strings.TrimSpace(string(output)) != "codex-cli "+c.Version {
+		return fmt.Errorf("managed Codex selection differs from recorded version %s; inspect recorded runtime and update/rollback history before repairing selection links; no release was archived", c.Version)
+	}
+	return nil
 }
 func (a *App) componentBinary(name string) string {
 	c := a.S.Components[name]

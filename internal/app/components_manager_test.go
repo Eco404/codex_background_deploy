@@ -198,7 +198,7 @@ func TestComponentsCondaFailureKeepsNarrowOwnership(t *testing.T) {
 	a := componentTestApp(t)
 	a.RunCommand = func(_ context.Context, name string, args, env []string) ([]byte, error) {
 		if name == "curl" {
-			return nil, os.WriteFile(args[len(args)-1], []byte("fixture"), 0600)
+			return nil, os.WriteFile(args[len(args)-1], []byte("#!/bin/sh\n# Created by constructor\n"), 0600)
 		}
 		if name != "bash" {
 			t.Fatalf("unexpected command %s", name)

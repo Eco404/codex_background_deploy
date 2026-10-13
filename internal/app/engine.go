@@ -159,7 +159,25 @@ func (a *App) PlanInstall(ctx context.Context, opt InstallOptions) (Inventory, I
 			return inv, opt, errors.New("不能把将被接管的扩展目录内CLI作为后台；请选择独立CLI")
 		}
 	}
+	if opt.Extension != nil {
+		ext := *opt.Extension
+		selected := false
+		for _, root := range opt.Roots {
+			selected = selected || root == filepath.Clean(ext.Root)
+		}
+		if !selected {
+			return inv, opt, errors.New("扩展安装目标必须属于本次明确选择接管的目录")
+		}
+		ext.Yes, ext.DryRun = opt.Yes, opt.DryRun
+		ext, e = a.PlanExtension(ctx, ext)
+		if e != nil {
+			return inv, opt, e
+		}
+		opt.Extension = &ext
+		fmt.Fprintf(a.Out, "安装 Codex 扩展: %s → %s（扩展由 IDE 管理，核心卸载时保留）\n", ext.Source, ext.Root)
+	}
 	fmt.Fprintf(a.Out, "后台: %s\nCodex: %s\n维护目录: %s\n", opt.Backend, opt.CodexPath, a.P.Data)
+	a.progress("下载设置：%s", a.Network.Summary())
 	for _, r := range opt.Roots {
 		fmt.Fprintf(a.Out, "接管扩展根目录: %s\n", r)
 	}
@@ -207,6 +225,7 @@ func (a *App) validateCodex(ctx context.Context, path string) (Candidate, error)
 	return Candidate{Kind: "codex", Path: real, Version: version, Source: "reused", Compatible: true}, nil
 }
 func (a *App) Install(ctx context.Context, opt InstallOptions) (err error) {
+	a.progress("阶段 1/5 · 检查环境与安装计划")
 	inv, opt, e := a.PlanInstall(ctx, opt)
 	if e != nil {
 		return e
@@ -230,6 +249,7 @@ func (a *App) Install(ctx context.Context, opt InstallOptions) (err error) {
 }
 func (a *App) installExtras(ctx context.Context, opt InstallOptions) error {
 	for _, name := range opt.Components {
+		a.progress("可选组件 · %s", name)
 		co, ok := opt.ComponentOptions[name]
 		if !ok {
 			co = ComponentOptions{ShellIntegration: true}
@@ -252,6 +272,11 @@ func (a *App) ManagedComponent(ctx context.Context, action, name string, opt Com
 	defer unlock()
 	if hasPending(a.P.Data) {
 		return errors.New("先recover未完成事务")
+	}
+	if name == "codexapp" {
+		if err := a.CheckCodexAppReady(ctx, action, opt); err != nil {
+			return err
+		}
 	}
 	if name == "codexapp" && opt.InstallNode && (action == "install" || action == "configure") {
 		if e = a.ComponentAction(ctx, "install", "node", ComponentOptions{Path: "managed", ShellIntegration: opt.ShellIntegration, Yes: opt.Yes}); e != nil {
@@ -309,7 +334,13 @@ func (a *App) installCore(ctx context.Context, opt InstallOptions) (err error) {
 			}
 		}
 	}()
+	if opt.Extension != nil {
+		if e = a.installExtensionLocked(ctx, *opt.Extension); e != nil {
+			return e
+		}
+	}
 	candidate := Candidate{}
+	a.progress("阶段 2/5 · 准备 Codex 运行环境")
 	if opt.CodexPath == "managed" {
 		candidate, e = a.InstallManagedCodex(ctx, opt.CodexVersion)
 	} else {
@@ -319,6 +350,7 @@ func (a *App) installCore(ctx context.Context, opt InstallOptions) (err error) {
 		return e
 	}
 	a.S.Codex = candidate
+	a.progress("阶段 3/5 · 写入运行程序与后台配置")
 	a.S.Backend = opt.Backend
 	a.S.EntrypointDir = opt.EntrypointDir
 	a.S.Installer = a.P.Installer
@@ -351,6 +383,7 @@ func (a *App) installCore(ctx context.Context, opt InstallOptions) (err error) {
 	if e = a.Start(ctx); e != nil {
 		return e
 	}
+	a.progress("阶段 4/5 · 后台已就绪，备份并配置选定扩展入口")
 	for _, r := range opt.Roots {
 		exts, e := scanRoot(r)
 		if e != nil {
@@ -384,6 +417,7 @@ func (a *App) installCore(ctx context.Context, opt InstallOptions) (err error) {
 		return e
 	}
 	a.event("installed", a.S.Backend)
+	a.progress("阶段 5/5 · 核心安装完成")
 	fmt.Fprintln(a.Out, "后台已安装；请Reload Window，首页会显示实际入口连接。")
 	return nil
 }

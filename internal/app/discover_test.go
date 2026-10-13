@@ -209,7 +209,7 @@ func TestUIOptionalComponentsStayDisabledAndCollectOptionsBeforeInstall(t *testi
 func TestUICodexAppNodeDependencyRequiresFinalConfirmation(t *testing.T) {
 	called := false
 	var received ComponentOptions
-	m := &uiModel{ctx: context.Background(), app: &App{}, component: "codexapp", componentAction: "install", componentOptions: ComponentOptions{Yes: true, Path: "managed"}, actions: UIActions{Component: func(_ context.Context, _, _ string, opt ComponentOptions) error {
+	m := &uiModel{networkReady: true, ctx: context.Background(), app: &App{}, component: "codexapp", componentAction: "install", componentOptions: ComponentOptions{Yes: true, Path: "managed"}, actions: UIActions{Component: func(_ context.Context, _, _ string, opt ComponentOptions) error {
 		called = true
 		received = opt
 		return nil
@@ -271,7 +271,7 @@ func TestUIShellIntegrationDefaultsOnAndCanBeDisabled(t *testing.T) {
 	if !m.componentOptions.ShellIntegration {
 		t.Fatal("shell integration did not default on")
 	}
-	m.componentOptions.Path = "/existing/node"
+	m.componentOptions.Path = "managed"
 	m.componentConfirm()
 	if m.title != "组件 · shell 集成" {
 		t.Fatal("integration toggle not presented")
@@ -306,7 +306,11 @@ func TestUICoreActionsDefaultToSafeWithoutForce(t *testing.T) {
 				Update: func(_ context.Context, _ string, f bool) error { return invoke(f) }, Rollback: func(_ context.Context, _ string, f bool) error { return invoke(f) }, Uninstall: func(_ context.Context, f bool) error { return invoke(f) }, Service: func(_ context.Context, _ string, f bool) error { return invoke(f) },
 			}}
 			m.home()
+			m.networkReady = true
+			m.app.P.Data = t.TempDir()
+			discoveryFixture(t, filepath.Join(m.app.P.Data, "history", "abc.json"), `{"Action":"update"}`)
 			m.app.S.Installed = true
+			m.app.S.Codex.Source = "managed"
 			uiChooseTest(t, m, "部署管理")
 			switch action {
 			case "update":
@@ -342,6 +346,8 @@ func TestUICoreActionsDefaultToSafeWithoutForce(t *testing.T) {
 func TestUIRepairUsesRepairCallbackAndManagedSelectionIsExplicit(t *testing.T) {
 	called := false
 	m := &uiModel{ctx: context.Background(), app: &App{}, actions: UIActions{Repair: func(context.Context) error { called = true; return nil }}}
+	m.app.S.Installed = true
+	m.app.P.Data = t.TempDir()
 	m.home()
 	uiChooseTest(t, m, "运行与维护")
 	uiChooseTest(t, m, "修复受管扩展入口")

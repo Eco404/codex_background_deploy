@@ -30,6 +30,8 @@ type Extension struct {
 type Inventory struct {
 	Host, User              string
 	Container, Systemd, Apt bool
+	Privileged              bool
+	ServiceState            string
 	EntrypointDir, MediaDir string
 	Candidates              map[string][]Candidate
 	Extensions              []Extension
@@ -89,6 +91,7 @@ type Backup struct {
 	Deleted  bool      `json:"deleted,omitempty"`
 }
 type InstallOptions struct {
+	Extension                                       *ExtensionInstallOptions
 	Backend, CodexPath, CodexVersion, EntrypointDir string
 	Roots                                           []string
 	Yes, DryRun, Force, Linger                      bool
@@ -96,12 +99,14 @@ type InstallOptions struct {
 	ComponentOptions                                map[string]ComponentOptions
 }
 type ComponentOptions struct {
+	Configure                                          bool
 	Path, Version, PasswordFile, Port, MediaDir, Shell string
 	ShellIntegration                                   bool
 	InstallNode                                        bool
 	Yes, DryRun                                        bool
 }
 type App struct {
+	Network  NetworkOptions
 	P        Paths
 	S        State
 	Out, Err io.Writer
@@ -111,6 +116,8 @@ type App struct {
 
 // The UI invokes these same operations as CLI. No UI mutation logic.
 type UIActions struct {
+	Recover      func(context.Context) error
+	Extension    func(context.Context, ExtensionInstallOptions) error
 	Inventory    func(context.Context) (Inventory, error)
 	Status       func(context.Context) string
 	Install      func(context.Context, InstallOptions) error

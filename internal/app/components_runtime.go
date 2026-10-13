@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,80 @@ import (
 	"syscall"
 	"time"
 )
+
+// CodexAppPasswordPath is the runtime credential location, including when the
+// executable is reused from an installation that this tool must not modify.
+func (a *App) CodexAppPasswordPath() string {
+	root := a.componentRoot("codexapp")
+	if c := a.S.Components["codexapp"]; c != nil {
+		root = a.codexappRuntime(c)
+	}
+	return filepath.Join(root, "password")
+}
+
+// CheckCodexAppReady is run before acquiring dependencies or changing runtime
+// configuration. Registering an external executable alone does not start it.
+func (a *App) CheckCodexAppReady(ctx context.Context, action string, opt ComponentOptions) error {
+	if action != "install" && action != "configure" && action != "start" {
+		return nil
+	}
+	if action == "install" && !opt.Configure && opt.PasswordFile == "" && opt.Path != "managed" {
+		return nil
+	}
+	return a.requireCodexAppCore(ctx)
+}
+
+func (a *App) requireCodexAppCore(ctx context.Context) error {
+	if !a.S.Installed {
+		return errors.New("CodexApp requires an installed core; install the background service first")
+	}
+	if err := a.Health(ctx); err != nil {
+		return fmt.Errorf("CodexApp requires a ready core; start or repair the background service first: %w", err)
+	}
+	return nil
+}
+
+// Selecting the default preserves an existing credential. Only a missing
+// managed credential generates a new secret; malformed/unreadable files must
+// not silently rotate the password. This helper only prepares bytes in memory.
+func codexAppPassword(source, destination string) ([]byte, error) {
+	if source != "" && !filepath.IsAbs(source) {
+		return nil, errors.New("CodexApp password file must be an absolute path")
+	}
+	path := source
+	if path == "" {
+		path = destination
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			secret := make([]byte, 32)
+			if _, err = rand.Read(secret); err != nil {
+				return nil, fmt.Errorf("generate CodexApp password: %w", err)
+			}
+			return []byte(base64.RawURLEncoding.EncodeToString(secret) + "\n"), nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("managed CodexApp password must be a regular file")
+		}
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("CodexApp password source must be a regular file")
+	}
+	password, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(string(password)) == "" {
+		return nil, errors.New("empty CodexApp password; provide a non-empty password file")
+	}
+	return password, nil
+}
 
 func (a *App) installCodexApp(ctx context.Context, c *Component, opt ComponentOptions) error {
 	node := a.componentBinary("node")
@@ -30,15 +106,9 @@ func (a *App) installCodexApp(ctx context.Context, c *Component, opt ComponentOp
 	if _, err := os.Stat(npm); err != nil {
 		return fmt.Errorf("npm matching Node unavailable: %w", err)
 	}
-	if opt.PasswordFile == "" {
-		return errors.New("CodexApp requires --password-file")
-	}
-	password, err := os.ReadFile(opt.PasswordFile)
+	password, err := codexAppPassword(opt.PasswordFile, filepath.Join(c.Path, "password"))
 	if err != nil {
 		return err
-	}
-	if strings.TrimSpace(string(password)) == "" {
-		return errors.New("empty CodexApp password")
 	}
 	port, err := componentPort(opt.Port)
 	if err != nil {
@@ -58,7 +128,7 @@ func (a *App) installCodexApp(ctx context.Context, c *Component, opt ComponentOp
 		return err
 	}
 	env := map[string]string{"PATH": filepath.Dir(node) + string(os.PathListSeparator) + os.Getenv("PATH")}
-	if _, err = a.componentRun(ctx, env, npm, "install", "--prefix", c.Path, "--no-audit", "--no-fund", "--save-exact", "codexapp@"+version); err != nil {
+	if _, err = a.installRun(ctx, env, npm, "install", "--prefix", c.Path, "--no-audit", "--no-fund", "--save-exact", "codexapp@"+version); err != nil {
 		return err
 	}
 	if err = AtomicWrite(filepath.Join(c.Path, "password"), password, 0600); err != nil {
@@ -179,7 +249,7 @@ func (a *App) StartComponent(ctx context.Context, name string) error {
 	}
 	if c.Ownership == "reused" && (name != "codexapp" || c.Options["managed_runtime"] != "true") {
 		if name == "codexapp" {
-			return errors.New("registered external CodexApp needs configure --password-file before managed start")
+			return errors.New("registered external CodexApp needs configure before managed start")
 		}
 		return nil
 	}

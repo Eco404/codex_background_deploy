@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -80,10 +81,41 @@ func (a *App) Discover(ctx context.Context) (Inventory, error) {
 	if _, err := a.probe(ctx, "systemctl", "--user", "show-environment"); err == nil {
 		inv.Systemd = true
 	}
+	if a.S.Installed {
+		inv.ServiceState = "unknown"
+		switch a.S.Backend {
+		case "systemd":
+			if output, err := a.probe(ctx, "systemctl", "--user", "show", "codex-bg.service", "--property=ActiveState", "--value"); err == nil {
+				switch strings.TrimSpace(string(output)) {
+				case "active":
+					inv.ServiceState = "running"
+				case "inactive", "failed":
+					inv.ServiceState = "stopped"
+				}
+			}
+		case "container":
+			record, err := a.runtimeReadPID()
+			if errors.Is(err, os.ErrNotExist) {
+				inv.ServiceState = "stopped"
+			} else if err == nil && runtimeValidPID(record) {
+				inv.ServiceState = "running"
+			}
+		}
+	}
+	aptFound, dpkgFound := false, false
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if executable(filepath.Join(dir, "apt-get")) {
-			inv.Apt = true
+			aptFound = true
 		}
+		if executable(filepath.Join(dir, "dpkg-query")) {
+			dpkgFound = true
+		}
+	}
+	inv.Apt = aptFound && dpkgFound
+	inv.Privileged = os.Geteuid() == 0
+	if !inv.Privileged && inv.Container && inv.Apt {
+		_, err := a.probe(ctx, "sudo", "-n", "true")
+		inv.Privileged = err == nil
 	}
 	if inv.Container {
 		for _, file := range []string{"/usr/bin/entrypoint.sh", "/usr/local/bin/entrypoint.sh"} {
@@ -109,7 +141,7 @@ func (a *App) Discover(ctx context.Context) (Inventory, error) {
 			locations = append(locations, located{kind, p, source})
 		}
 	}
-	for _, kind := range []string{"codex", "node", "conda", "codexapp"} {
+	for _, kind := range []string{"codex", "node", "conda", "codexapp", "code-server"} {
 		names := []string{kind}
 		if kind == "codexapp" {
 			names = []string{"codexapp", "CodexApp"}
@@ -122,6 +154,9 @@ func (a *App) Discover(ctx context.Context) (Inventory, error) {
 				add(kind, filepath.Join(dir, name), "PATH")
 			}
 		}
+	}
+	for _, p := range []string{"/usr/bin/code-server", "/usr/local/bin/code-server", filepath.Join(home, ".local/bin/code-server")} {
+		add("code-server", p, "existing code-server")
 	}
 	for _, p := range []string{a.S.Codex.Path, filepath.Join(home, ".codex/packages/standalone/current/codex"), filepath.Join(home, ".local/bin/codex"), filepath.Join(home, "apps/codex/bin/codex"), filepath.Join(a.P.Runtime, "codex/current/codex")} {
 		add("codex", p, "existing installation")

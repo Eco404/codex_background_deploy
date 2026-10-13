@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -29,7 +30,7 @@ func TestUIDeploymentRoutesByDetectedState(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		t.Run(fmt.Sprintf("legacy=%v", legacy), func(t *testing.T) {
 			installed, migrated := 0, 0
-			m := &uiModel{ctx: context.Background(), app: &App{}, actions: UIActions{
+			m := &uiModel{networkReady: true, ctx: context.Background(), app: &App{}, actions: UIActions{
 				Install: func(context.Context, InstallOptions) error { installed++; return nil },
 				Migrate: func(context.Context, InstallOptions) error { migrated++; return nil },
 			}}
@@ -46,7 +47,7 @@ func TestUIDeploymentRoutesByDetectedState(t *testing.T) {
 			if legacy {
 				label = "迁移现有部署"
 			}
-			if len(m.items) != 2 {
+			if len(m.items) != 3 {
 				t.Fatal("uninstalled state exposes duplicate or unavailable operations")
 			}
 			uiChooseTest(t, m, label)
@@ -71,8 +72,9 @@ func TestUIDeploymentRoutesByDetectedState(t *testing.T) {
 			}
 		})
 	}
-	m := &uiModel{app: &App{}}
+	m := &uiModel{networkReady: true, app: &App{}}
 	m.app.S.Installed = true
+	m.app.P.Data = t.TempDir()
 	m.inventory.Legacy = []string{"remaining legacy files"}
 	m.deploymentMenu()
 	for _, item := range m.items {
@@ -85,7 +87,8 @@ func TestUIDeploymentRoutesByDetectedState(t *testing.T) {
 
 func TestUIBackAndReadResultsStayInSection(t *testing.T) {
 	for _, returnKey := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyEnter}} {
-		m := &uiModel{ctx: context.Background(), app: &App{}, actions: UIActions{Status: func(context.Context) string { return "stopped" }}}
+		m := &uiModel{networkReady: true, ctx: context.Background(), app: &App{}, actions: UIActions{Status: func(context.Context) string { return "stopped" }}}
+		m.app.S.Installed = true
 		m.home()
 		uiChooseTest(t, m, "运行与维护")
 		uiChooseTest(t, m, "后台服务")
@@ -109,7 +112,7 @@ func TestUIBackAndReadResultsStayInSection(t *testing.T) {
 }
 
 func TestUIWizardBackPreservesSelectionAndDropsUnfinishedComponent(t *testing.T) {
-	m := &uiModel{app: &App{}, inventory: Inventory{Systemd: true, Extensions: []Extension{{Root: "/extensions"}}, Candidates: map[string][]Candidate{"codex": {{Path: "/codex", Compatible: true}}}}}
+	m := &uiModel{networkReady: true, app: &App{}, inventory: Inventory{Systemd: true, Extensions: []Extension{{Root: "/extensions"}}, Candidates: map[string][]Candidate{"codex": {{Path: "/codex", Compatible: true}}}}}
 	m.installWizard(false)
 	uiChooseTest(t, m, "[ ] /extensions")
 	uiChooseTest(t, m, "下一步")
@@ -138,7 +141,8 @@ func TestUIWizardBackPreservesSelectionAndDropsUnfinishedComponent(t *testing.T)
 
 func TestUICancelResetsStrongConfirmation(t *testing.T) {
 	called := false
-	m := &uiModel{app: &App{}, actions: UIActions{Service: func(context.Context, string, bool) error { called = true; return nil }}}
+	m := &uiModel{networkReady: true, app: &App{}, actions: UIActions{Service: func(context.Context, string, bool) error { called = true; return nil }}}
+	m.app.S.Installed = true
 	m.serviceMenu()
 	uiChooseTest(t, m, "停止")
 	uiChooseTest(t, m, "强制执行")
@@ -155,7 +159,7 @@ func TestUICancelResetsStrongConfirmation(t *testing.T) {
 }
 
 func TestUICancellingBrandingInputDoesNotEnableAddon(t *testing.T) {
-	m := &uiModel{app: &App{}, inventory: Inventory{Container: true}}
+	m := &uiModel{networkReady: true, app: &App{}, inventory: Inventory{Container: true, MediaDir: t.TempDir()}}
 	m.installWizard(false)
 	m.installComponents()
 	uiChooseTest(t, m, "[ ] branding")
@@ -171,8 +175,9 @@ func TestUICancellingBrandingInputDoesNotEnableAddon(t *testing.T) {
 
 func TestUIMutationRefreshesStateBeforeReturning(t *testing.T) {
 	for _, returnKey := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyEnter}} {
-		m := &uiModel{ctx: context.Background(), app: &App{}}
+		m := &uiModel{networkReady: true, ctx: context.Background(), app: &App{}}
 		m.app.S.Installed = true
+		m.app.P.Data = t.TempDir()
 		refreshed := false
 		m.actions = UIActions{
 			Uninstall: func(context.Context, bool) error { return nil },
@@ -195,10 +200,11 @@ func TestUIMutationRefreshesStateBeforeReturning(t *testing.T) {
 
 func TestUICleanupUsesSelectedTargetAndRefreshStaysInSection(t *testing.T) {
 	var action, target string
-	m := &uiModel{ctx: context.Background(), app: &App{P: Paths{Data: "/installer/installer-data"}}, actions: UIActions{
+	m := &uiModel{networkReady: true, ctx: context.Background(), app: &App{P: Paths{Data: "/installer/installer-data"}}, actions: UIActions{
 		DataAction: func(_ context.Context, a, p string) error { action, target = a, p; return nil },
 		Inventory:  func(context.Context) (Inventory, error) { return Inventory{}, nil },
 	}}
+	m.app.P.Data = t.TempDir()
 	m.filesMenu()
 	uiKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	if m.title != "备份与文件" {
@@ -206,7 +212,7 @@ func TestUICleanupUsesSelectedTargetAndRefreshStaysInSection(t *testing.T) {
 	}
 	uiChooseTest(t, m, "清理日志、缓存")
 	uiChooseTest(t, m, "清理无引用缓存")
-	if m.screen != "confirm" || !strings.Contains(m.detail, "/installer/installer-data/cache") {
+	if m.screen != "confirm" || !strings.Contains(m.detail, filepath.Join(m.app.P.Data, "cache")) {
 		t.Fatal("cleanup omitted precise target")
 	}
 	uiKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
@@ -221,7 +227,7 @@ func TestUICleanupUsesSelectedTargetAndRefreshStaysInSection(t *testing.T) {
 
 func TestUIBackupLoadFailureCanReturnToFiles(t *testing.T) {
 	calls := 0
-	m := &uiModel{app: &App{}, actions: UIActions{Backups: func() ([]Backup, error) {
+	m := &uiModel{networkReady: true, app: &App{}, actions: UIActions{Backups: func() ([]Backup, error) {
 		calls++
 		return nil, fmt.Errorf("backup metadata damaged")
 	}}}
@@ -238,7 +244,9 @@ func TestUIBackupLoadFailureCanReturnToFiles(t *testing.T) {
 }
 
 func TestUICancelledComponentDraftDoesNotLeakIntoNextAction(t *testing.T) {
-	m := &uiModel{app: &App{}}
+	m := &uiModel{networkReady: true, app: &App{}}
+	m.app.P.Data = t.TempDir()
+	m.app.S.Installed = true
 	m.components()
 	uiChooseTest(t, m, "codexapp")
 	uiChooseTest(t, m, "安装 / 复用")
@@ -256,6 +264,8 @@ func TestUICancelledComponentDraftDoesNotLeakIntoNextAction(t *testing.T) {
 		}
 		uiKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 	}
+	m.app.S.Components = map[string]*Component{"codexapp": {Status: "available", Ownership: "reused"}}
+	m.componentMenu()
 	uiChooseTest(t, m, "修改配置")
 	if m.componentOptions.InstallNode || m.componentOptions.Path != "" || m.componentOptions.Version != "" {
 		t.Fatal("cancelled install options leaked into configure")

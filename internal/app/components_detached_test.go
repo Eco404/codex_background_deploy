@@ -63,11 +63,11 @@ func TestComponentsDetachedCodexAppSurvivesCallerAndRestarts(t *testing.T) {
 	t.Setenv("CODEX_BG_COMPONENT_TEST_SOCKET", a.P.Socket)
 	root := a.componentRoot("codexapp")
 	entry := filepath.Join(root, "node_modules", ".bin", "codexapp")
-	fixture := `const http=require('node:http');const fs=require('node:fs');const cp=require('node:child_process');const a=process.argv;const child=cp.spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.writeFileSync('grandchild.pid',String(child.pid));http.createServer((q,r)=>r.end('fixture')).listen(Number(a[a.indexOf('--port')+1]),'127.0.0.1');setInterval(()=>console.log('fixture-alive'),100);`
+	fixture := `const http=require('node:http');const fs=require('node:fs');const cp=require('node:child_process');const a=process.argv;console.log('credential:',a[a.indexOf('--password')+1]);const child=cp.spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.writeFileSync('grandchild.pid',String(child.pid));http.createServer((q,r)=>r.end('fixture')).listen(Number(a[a.indexOf('--port')+1]),'127.0.0.1');setInterval(()=>console.log('fixture-alive'),100);`
 	if err = AtomicWrite(entry, []byte(fixture), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err = AtomicWrite(filepath.Join(root, "password"), []byte("fixture"), 0600); err != nil {
+	if err = AtomicWrite(filepath.Join(root, "password"), []byte("private-test-password"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -140,5 +140,8 @@ func TestComponentsDetachedCodexAppSurvivesCallerAndRestarts(t *testing.T) {
 	logs, err := os.ReadFile(filepath.Join(a.P.Data, "logs", "codexapp.log"))
 	if err != nil || !strings.Contains(string(logs), "fixture-alive") {
 		t.Fatal("detached logs missing")
+	}
+	if strings.Contains(string(logs), "private-test-password") || !strings.Contains(string(logs), "credential: [REDACTED]") {
+		t.Fatal("child credential output was not redacted")
 	}
 }

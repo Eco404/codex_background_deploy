@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -88,6 +89,13 @@ func (a *App) superviseCodexApp(parent context.Context, c *Component, node strin
 	}()
 	log := a.RuntimeLog("codexapp")
 	defer log.Close()
+	var secret []byte
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--password" {
+			secret = []byte(strings.TrimRight(args[i+1], "\r\n"))
+			break
+		}
+	}
 	backoff := time.Second
 	for {
 		if err = ctx.Err(); err != nil {
@@ -97,8 +105,10 @@ func (a *App) superviseCodexApp(parent context.Context, c *Component, node strin
 		cmd.Env = a.componentEnv(env)
 		cmd.Dir = root
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Stdout = log
-		cmd.Stderr = log
+		stdout := &secretLogWriter{dest: log, secret: secret}
+		stderr := &secretLogWriter{dest: log, secret: secret}
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
 		if err = cmd.Start(); err != nil {
 			fmt.Fprintf(log, "CodexApp child start failed: %v\n", err)
 		} else {
@@ -106,16 +116,25 @@ func (a *App) superviseCodexApp(parent context.Context, c *Component, node strin
 			if e != nil {
 				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 				_ = cmd.Wait()
+				_ = stdout.Flush()
+				_ = stderr.Flush()
 				return e
 			}
 			p := componentProcess{PID: cmd.Process.Pid, Start: start, Executable: args[0], OwnerPID: os.Getpid(), OwnerStart: ownerStart, OwnerExecutable: ownerExe}
 			if e = writeJSON(recordPath, p); e != nil {
 				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 				_ = cmd.Wait()
+				_ = stdout.Flush()
+				_ = stderr.Flush()
 				return e
 			}
 			done := make(chan error, 1)
-			go func() { done <- cmd.Wait() }()
+			go func() {
+				err := cmd.Wait()
+				_ = stdout.Flush()
+				_ = stderr.Flush()
+				done <- err
+			}()
 			select {
 			case <-ctx.Done():
 				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
