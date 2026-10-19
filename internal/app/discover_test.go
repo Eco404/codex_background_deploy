@@ -369,3 +369,46 @@ func TestUIRepairUsesRepairCallbackAndManagedSelectionIsExplicit(t *testing.T) {
 		t.Fatal("managed install can fall back to implicit reuse")
 	}
 }
+
+func TestDiscoverCodeServerAndServiceAvailability(t *testing.T) {
+	a := engineApp(t)
+	codeServer := filepath.Join(a.P.Home, "bin/code-server")
+	engineFile(t, codeServer, "code-server fixture")
+	a.RunCommand = func(_ context.Context, name string, args, env []string) ([]byte, error) {
+		if name == codeServer && len(args) == 1 && args[0] == "--version" {
+			return []byte("4.100.0 fixture"), nil
+		}
+		return nil, errors.New("unexpected discovery command: " + name)
+	}
+	t.Setenv("PATH", filepath.Dir(codeServer))
+	inv, err := a.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inv.Candidates["code-server"]) == 0 || inv.Candidates["code-server"][0].Path != codeServer || !inv.Candidates["code-server"][0].Compatible || inv.ServiceState != "" {
+		t.Fatalf("bad discovery: %+v", inv)
+	}
+	a.S.Installed, a.S.Backend = true, "container"
+	inv, err = a.Discover(context.Background())
+	if err != nil || inv.ServiceState != "stopped" {
+		t.Fatalf("missing supervisor should be stopped: %s %v", inv.ServiceState, err)
+	}
+	engineFile(t, a.runtimePIDFile(), "broken json")
+	inv, err = a.Discover(context.Background())
+	if err != nil || inv.ServiceState != "unknown" {
+		t.Fatalf("corrupt supervisor should remain unknown: %s %v", inv.ServiceState, err)
+	}
+	for _, tc := range []struct{ state, want string }{{"active", "running"}, {"inactive", "stopped"}, {"failed", "stopped"}, {"activating", "unknown"}} {
+		a.S.Backend = "systemd"
+		a.RunCommand = func(_ context.Context, name string, args, env []string) ([]byte, error) {
+			if name == "systemctl" {
+				return []byte(tc.state), nil
+			}
+			return []byte("4.100.0"), nil
+		}
+		inv, err = a.Discover(context.Background())
+		if err != nil || inv.ServiceState != tc.want {
+			t.Fatalf("%s -> %s, want %s (%v)", tc.state, inv.ServiceState, tc.want, err)
+		}
+	}
+}

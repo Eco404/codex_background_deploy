@@ -248,6 +248,9 @@ func (a *App) StartComponent(ctx context.Context, name string) error {
 		return nil
 	}
 	if c.Ownership == "reused" && (name != "codexapp" || c.Options["managed_runtime"] != "true") {
+		if name == "marketplace" {
+			return a.checkMarketplace(c)
+		}
 		if name == "codexapp" {
 			return errors.New("registered external CodexApp needs configure before managed start")
 		}
@@ -275,6 +278,8 @@ func (a *App) StartComponent(ctx context.Context, name string) error {
 		return err
 	case "branding":
 		return a.applyBranding(ctx, c)
+	case "marketplace":
+		return a.applyMarketplace(ctx, c)
 	}
 	return nil
 }

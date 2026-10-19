@@ -85,7 +85,7 @@ func run(ctx context.Context, args []string) error {
 				a.P.Data = filepath.Join(a.P.Installer, "installer-data")
 			}
 			return a.Discover(c)
-		}, Status: a.Status, Install: a.Install, Migrate: a.Migrate, Extension: a.InstallExtension, Diagnose: a.Diagnose, Repair: a.Reconcile, Recover: a.Recover, Service: a.Service, Update: a.Update, Rollback: a.Rollback, Uninstall: a.Uninstall, Component: a.ManagedComponent, Backups: a.Backups, BackupAction: a.BackupAction, DataAction: a.DataAction, Logs: a.Logs})
+		}, Status: a.Status, Install: a.Install, Migrate: a.Migrate, Diagnose: a.Diagnose, Repair: a.Reconcile, Recover: a.Recover, Service: a.Service, Update: a.Update, Rollback: a.Rollback, Uninstall: a.Uninstall, Component: a.ManagedComponent, Backups: a.Backups, BackupAction: a.BackupAction, DataAction: a.DataAction, Logs: a.Logs})
 	}
 	command := args[0]
 	args = args[1:]
@@ -113,8 +113,6 @@ func run(ctx context.Context, args []string) error {
 	opt := app.InstallOptions{Backend: "auto"}
 	cop := app.ComponentOptions{ShellIntegration: true}
 	network := app.DefaultNetworkOptions()
-	extension := app.ExtensionInstallOptions{}
-	extensionSource := false
 	positional := []string{}
 	for j := 0; j < len(args); j++ {
 		arg := args[j]
@@ -139,7 +137,7 @@ func run(ctx context.Context, args []string) error {
 			network.UseMirrors = true
 		case "--no-proxy":
 			network.ProxyMode = "none"
-		case "--backend", "--codex", "--version", "--extension-root", "--entrypoint-dir", "--path", "--password-file", "--port", "--media-dir", "--shell", "--component", "--npm-registry", "--node-mirror", "--conda-mirror", "--proxy", "--extension-source", "--source", "--code-server":
+		case "--backend", "--codex", "--version", "--extension-root", "--entrypoint-dir", "--path", "--password-file", "--port", "--media-dir", "--shell", "--component", "--npm-registry", "--node-mirror", "--conda-mirror", "--proxy":
 			if j+1 >= len(args) {
 				return fmt.Errorf("%s缺少参数", arg)
 			}
@@ -155,7 +153,6 @@ func run(ctx context.Context, args []string) error {
 				cop.Version = v
 			case "--extension-root":
 				opt.Roots = append(opt.Roots, v)
-				extension.Root = v
 			case "--entrypoint-dir":
 				opt.EntrypointDir = v
 			case "--path":
@@ -178,10 +175,6 @@ func run(ctx context.Context, args []string) error {
 				network.UseMirrors, network.CondaMirror = true, v
 			case "--proxy":
 				network.ProxyMode, network.Proxy = "custom", v
-			case "--extension-source", "--source":
-				extension.Source, extensionSource = v, true
-			case "--code-server":
-				extension.CodeServer = v
 			}
 		default:
 			if strings.HasPrefix(arg, "--") {
@@ -199,13 +192,6 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	a.Network = network
-	extension.Yes, extension.DryRun = yes, dry
-	if extensionSource && (command == "install" || command == "migrate") {
-		if len(opt.Roots) != 1 {
-			return errors.New("安装扩展时需要且仅选择一个 --extension-root；其余目标可后续接管")
-		}
-		opt.Extension = &extension
-	}
 	opt.ComponentOptions = map[string]app.ComponentOptions{}
 	for _, name := range opt.Components {
 		opt.ComponentOptions[name] = cop
@@ -287,8 +273,13 @@ func run(ctx context.Context, args []string) error {
 		if len(positional) != 2 {
 			return errors.New("component list/install/configure/uninstall NAME")
 		}
-		if positional[0] != "list" && positional[0] != "status" && !dry {
-			if positional[0] == "install" || cop.InstallNode {
+		if positional[0] != "list" && positional[0] != "status" && positional[0] != "plan" && !dry {
+			if positional[0] == "install" && positional[1] == "marketplace" {
+				if err := a.ManagedComponent(ctx, "plan", "marketplace", cop); err != nil {
+					return err
+				}
+			}
+			if (positional[0] == "install" && positional[1] != "marketplace") || cop.InstallNode {
 				fmt.Println(network.Summary())
 			}
 			if !confirm(yes, "确认组件操作："+strings.Join(positional, " ")) {
@@ -297,19 +288,6 @@ func run(ctx context.Context, args []string) error {
 			cop.Yes = true
 		}
 		return a.ManagedComponent(ctx, positional[0], positional[1], cop)
-	case "extension":
-		if len(positional) != 1 || positional[0] != "install" {
-			return errors.New("extension install --extension-root DIR --source marketplace|VSIX|EXTENSION_DIR [--code-server PATH]")
-		}
-		if _, e := a.PlanExtension(ctx, extension); e != nil {
-			return e
-		}
-		fmt.Printf("扩展来源：%s\n目标：%s\n%s\n", extension.Source, extension.Root, network.Summary())
-		if !dry && !confirm(yes, "确认将 Codex 扩展安装到明确选择的 code-server 扩展目录？") {
-			return nil
-		}
-		extension.Yes = true
-		return a.InstallExtension(ctx, extension)
 	case "backup":
 		if len(positional) < 1 {
 			return errors.New("backup list/show/path/verify/restore/delete/prune [ID]")
@@ -366,11 +344,10 @@ install | migrate --extension-root DIR [--codex PATH|managed] [--backend auto|sy
 repair | recover | start | stop | restart [--yes] [--force]
 update [--version VERSION] | rollback TRANSACTION_ID [--yes] [--force]
 uninstall [--yes] [--force]
-component install|configure|uninstall|status NAME [--path PATH] [--version VERSION]
+component install|configure|repair|uninstall|status|plan NAME [--path PATH] [--version VERSION]
   [--no-shell] [--password-file FILE] [--port PORT] [--configure] [--dry-run] [--yes]
-extension install --extension-root DIR --source marketplace|LOCAL_VSIX|EXTENSION_DIR
-  [--code-server PATH] [--dry-run] [--yes]
-install/migrate 可加 --extension-source marketplace|LOCAL_VSIX|EXTENSION_DIR
+  marketplace: 仅 code-server 容器，选择微软官方插件源；不安装插件
+  install/migrate --component marketplace 可与核心一起选择
 安装/组件/更新下载选项（仅本次操作，不修改全局配置）：
   --mirrors [--npm-registry URL] [--node-mirror URL] [--conda-mirror URL]
   [--proxy http(s)://HOST:PORT|socks5://HOST:PORT | --no-proxy]

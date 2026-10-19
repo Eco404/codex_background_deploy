@@ -125,7 +125,7 @@ func (a *App) componentDownload(ctx context.Context, url, path string) error {
 }
 func (a *App) ComponentAction(ctx context.Context, action, name string, opt ComponentOptions) error {
 	switch name {
-	case "node", "miniconda", "codex-cli", "codexapp", "apti", "branding":
+	case "node", "miniconda", "codex-cli", "codexapp", "apti", "branding", "marketplace":
 	default:
 		return fmt.Errorf("unknown component %q", name)
 	}
@@ -141,6 +141,13 @@ func (a *App) ComponentAction(ctx context.Context, action, name string, opt Comp
 		return nil
 	}
 	if action == "plan" || opt.DryRun {
+		if name == "marketplace" && (action == "plan" || action == "install") {
+			inv, err := a.Discover(ctx)
+			if err != nil {
+				return err
+			}
+			return a.planMarketplace(inv)
+		}
 		if a.Out != nil {
 			fmt.Fprintf(a.Out, "%s %s: %s; external paths are reused and never deleted\n", action, name, a.componentRoot(name))
 		}
@@ -172,6 +179,12 @@ func (a *App) ComponentAction(ctx context.Context, action, name string, opt Comp
 		if c.Status != "installed" {
 			return errors.New("partial installation preserved; uninstall this component, then install again")
 		}
+		if name == "marketplace" {
+			if c.Ownership == "managed" {
+				return a.applyMarketplace(ctx, c)
+			}
+			return a.checkMarketplace(c)
+		}
 		for _, f := range c.Files {
 			b, err := os.ReadFile(f.Path)
 			if err != nil || componentHash(b) != f.Hash {
@@ -190,6 +203,9 @@ func (a *App) ComponentAction(ctx context.Context, action, name string, opt Comp
 			return nil
 		}
 		return fmt.Errorf("%s has incomplete state; uninstall or repair before retry", name)
+	}
+	if name == "marketplace" {
+		return a.installMarketplace(ctx)
 	}
 	forceManaged := opt.Path == "managed"
 	if forceManaged {
@@ -506,8 +522,13 @@ func (a *App) removeComponent(ctx context.Context, name string) error {
 			}
 		}
 	}
+	if name == "marketplace" {
+		if err := a.restoreMarketplace(ctx, c); err != nil {
+			return err
+		}
+	}
 	for _, f := range c.Files {
-		if name == "branding" || strings.HasPrefix(f.Path, c.Path+string(os.PathSeparator)) {
+		if name == "branding" || name == "marketplace" || strings.HasPrefix(f.Path, c.Path+string(os.PathSeparator)) {
 			continue
 		}
 		b, err := os.ReadFile(f.Path)
@@ -555,7 +576,7 @@ func (a *App) RunComponent(ctx context.Context, name string) error {
 }
 func (a *App) ContainerExtras(ctx context.Context) error {
 	var failures []error
-	for _, n := range []string{"apti", "branding", "codexapp"} {
+	for _, n := range []string{"apti", "branding", "marketplace", "codexapp"} {
 		if c := a.S.Components[n]; c != nil && c.Status == "installed" {
 			if err := a.StartComponent(ctx, n); err != nil {
 				failures = append(failures, fmt.Errorf("%s: %w", n, err))

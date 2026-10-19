@@ -74,8 +74,6 @@ type uiModel struct {
 	networkReady               bool
 	networkDraft               NetworkOptions
 	networkNext, networkBack   uiRoute
-	extensionDraft             ExtensionInstallOptions
-	extensionForInstall        bool
 	parentCtx                  context.Context
 	cancel                     context.CancelFunc
 	cancelling                 bool
@@ -188,9 +186,6 @@ func (m *uiModel) deploymentMenu() {
 		note = "核心已安装。可在此管理组件和版本；检查服务或修复扩展入口请进入「运行与维护」。"
 	}
 	items = append(items, m.item("可选组件", uiShow((*uiModel).components)))
-	if m.codeServerPath() != "" {
-		items = append(items, m.choice("为 code-server 添加 Codex 扩展", m.mutationBlock(), func(m *uiModel) tea.Cmd { return m.extensionWizard(false) }))
-	}
 	items = append(items, m.item("下载设置 · 镜像源与代理", func(m *uiModel) tea.Cmd {
 		return m.networkWizard(uiShow((*uiModel).deploymentMenu), uiShow((*uiModel).deploymentMenu))
 	}))
@@ -393,12 +388,6 @@ func (m *uiModel) rootMenu() {
 		}
 		items = append(items, m.item(mark+root, func(m *uiModel) tea.Cmd { m.selected[root] = !m.selected[root]; m.rootMenu(); return nil }))
 	}
-	if m.codeServerPath() != "" {
-		items = append(items, m.item("为 code-server 添加 Codex 扩展", func(m *uiModel) tea.Cmd { return m.extensionWizard(true) }))
-	}
-	if m.options.Extension != nil {
-		items = append(items, m.item("取消本次扩展安装计划", func(m *uiModel) tea.Cmd { m.options.Extension = nil; m.rootMenu(); return nil }))
-	}
 	items = append(items, m.item("添加扩展根目录", func(m *uiModel) tea.Cmd {
 		return m.ask("扩展根目录绝对路径", func(m *uiModel, s string) tea.Cmd {
 			if !strings.HasPrefix(s, "/") {
@@ -419,10 +408,6 @@ func (m *uiModel) rootMenu() {
 		}
 		if len(m.options.Roots) == 0 {
 			m.err = fmt.Errorf("请明确选择至少一个扩展根目录")
-			return nil
-		}
-		if m.options.Extension != nil && !m.selected[m.options.Extension.Root] {
-			m.err = fmt.Errorf("请选中待安装扩展的目标根目录，或取消扩展安装计划")
 			return nil
 		}
 		m.codexMenu()
@@ -530,7 +515,7 @@ func (m *uiModel) installComponents() {
 		if hasString(m.options.Components, name) {
 			mark = "[x] "
 		}
-		items = append(items, m.choice(mark+name, m.componentInstallBlock(name, true), func(m *uiModel) tea.Cmd {
+		items = append(items, m.choice(mark+componentLabel(name), m.componentInstallBlock(name, true), func(m *uiModel) tea.Cmd {
 			next := []string{}
 			found := false
 			for _, n := range m.options.Components {
@@ -568,14 +553,15 @@ func (m *uiModel) installComponents() {
 		return m.withNetwork(func(m *uiModel) tea.Cmd {
 			description := fmt.Sprintf("操作：%s\n方式：%s\nCodex：%s 版本：%s\n扩展目录：\n  %s\n可选组件：%v\nlinger：%v", m.deploymentKind(), m.options.Backend, m.options.CodexPath, m.options.CodexVersion, strings.Join(m.options.Roots, "\n  "), m.options.Components, m.options.Linger)
 			description += "\n" + m.app.Network.Summary()
-			if m.options.Extension != nil {
-				description += "\n安装 Codex 扩展：" + m.options.Extension.Source + "\n目标：" + m.options.Extension.Root
-			}
 			if m.migrate {
 				description += "\n\n" + m.migrationSummary()
 			}
 			for _, name := range m.options.Components {
 				opt := m.options.ComponentOptions[name]
+				if name == "marketplace" {
+					description += "\n微软官方插件源：" + m.inventory.CodeServerProduct + "\n替换整个插件库来源；已是微软源则复用。需要手动重启 code-server 后生效，不安装任何插件。"
+					continue
+				}
 				description += fmt.Sprintf("\n%s：path=%s version=%s port=%s password-file=%s 安装Node依赖=%v", name, opt.Path, opt.Version, opt.Port, opt.PasswordFile, opt.InstallNode)
 				if name == "codexapp" && opt.PasswordFile == "" {
 					description += "\n密码默认保存位置：" + m.app.CodexAppPasswordPath() + "（已有则保留，否则自动生成）"
@@ -596,12 +582,19 @@ func (m *uiModel) installComponents() {
 	}))
 	m.menu(m.deploymentKind()+" · 可选组件（核心不依赖 Node）", uiShow((*uiModel).backendMenu), items...)
 }
+func componentLabel(name string) string {
+	if name == "marketplace" {
+		return "微软官方插件源 (marketplace)"
+	}
+	return name
+}
+
 func (m *uiModel) components() {
 	items := []uiItem{}
 	names := m.componentNames()
 	for _, name := range names {
 		name := name
-		items = append(items, m.item(name, func(m *uiModel) tea.Cmd {
+		items = append(items, m.item(componentLabel(name), func(m *uiModel) tea.Cmd {
 			m.component = name
 			m.componentForInstall = false
 			m.componentOptions = ComponentOptions{Yes: true, ShellIntegration: true}
@@ -629,6 +622,14 @@ func (m *uiModel) componentMenu() {
 	for _, action := range actions {
 		action := action
 		labels := map[string]string{"install": "安装 / 复用", "repair": "校验组件", "uninstall": "卸载 / 解除引用", "configure": "修改配置"}
+		if m.component == "marketplace" {
+			labels["install"] = "启用 / 复用微软官方插件源"
+			labels["repair"] = "校验并重新应用插件源"
+			labels["uninstall"] = "恢复原插件源 / 解除引用"
+			if c != nil && c.Ownership == "reused" {
+				labels["repair"] = "校验已有插件源"
+			}
+		}
 		reason := m.componentActionBlock(action)
 		items = append(items, m.choice(labels[action], reason, func(m *uiModel) tea.Cmd {
 			m.componentAction = action
@@ -645,7 +646,7 @@ func (m *uiModel) componentMenu() {
 			return nil
 		}))
 	}
-	m.menu("组件 · "+m.component, uiShow((*uiModel).components), items...)
+	m.menu("组件 · "+componentLabel(m.component), uiShow((*uiModel).components), items...)
 	if c != nil {
 		m.note = "状态：" + c.Status + " · " + c.Ownership + "\n路径：" + c.Path
 	}
@@ -658,7 +659,7 @@ func (m *uiModel) componentParent() uiRoute {
 	return uiShow((*uiModel).componentMenu)
 }
 func (m *uiModel) componentCandidates() {
-	if m.component == "apti" {
+	if m.component == "apti" || m.component == "marketplace" {
 		m.componentConfirm()
 		return
 	}
@@ -847,10 +848,32 @@ func (m *uiModel) finishComponentOptions() tea.Cmd {
 	name, action, opts := m.component, m.componentAction, m.componentOptions
 	next := func(m *uiModel) tea.Cmd {
 		detail := fmt.Sprintf("组件 %s · %s\n路径：%s\n版本：%s\n端口：%s\nshell 集成：%v\n安装受管 Node 依赖：%v", name, action, opts.Path, opts.Version, opts.Port, opts.ShellIntegration, opts.InstallNode)
+		if name == "marketplace" {
+			detail = "组件 微软官方插件源 (marketplace) · " + action
+			target := m.inventory.CodeServerProduct
+			if c := m.app.S.Components[name]; c != nil {
+				target = c.Options["product"]
+			}
+			detail += "\n目标：" + target
+			switch action {
+			case "install":
+				detail += "\n替换此 code-server 的整个插件库；原配置备份到维护目录，已是微软源则复用。\n需要手动重启 code-server 后生效，不安装任何插件。卸载时恢复原插件源。"
+			case "uninstall":
+				detail += "\n恢复备份中的原插件源；需要重启 code-server 后生效。"
+				if c := m.app.S.Components[name]; c != nil && c.Ownership == "reused" {
+					detail = "解除已有微软插件源的引用，保留插件库配置。\n目标：" + target
+				}
+			case "repair":
+				detail += "\n校验配置与恢复备份；仅当恢复为已备份的原插件源时重新应用微软源。\n未知外部改动将保留。重新应用后需要手动重启 code-server。"
+				if c := m.app.S.Components[name]; c != nil && c.Ownership == "reused" {
+					detail = "校验已复用的微软插件源；保留外部配置，不重新应用。\n目标：" + target
+				}
+			}
+		}
 		if name == "codexapp" && opts.PasswordFile == "" {
 			detail += "\n密码：保留现有密码；首次自动生成\n密码文件：" + m.app.CodexAppPasswordPath()
 		}
-		if action == "install" || opts.InstallNode {
+		if (action == "install" && name != "marketplace") || opts.InstallNode {
 			detail += "\n" + m.app.Network.Summary()
 		}
 		return m.confirm(detail, action == "uninstall", func() tea.Msg {
@@ -860,7 +883,7 @@ func (m *uiModel) finishComponentOptions() tea.Cmd {
 			return uiResult{err: m.actions.Component(m.ctx, action, name, opts), text: "组件操作完成"}
 		})
 	}
-	if action == "install" || opts.InstallNode {
+	if (action == "install" && name != "marketplace") || opts.InstallNode {
 		return m.withNetwork(next)
 	}
 	return next(m)

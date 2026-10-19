@@ -38,6 +38,9 @@ func (a *App) Status(ctx context.Context) string {
 		text += kind + ": " + usable + "\n"
 	}
 	text += fmt.Sprintf("IDE: 发现%d个扩展，已绑定%d个入口\n", len(inv.Extensions), len(a.S.Bindings))
+	if inv.Container && inv.CodeServerProduct != "" {
+		text += "微软插件源: " + marketplaceSummary(a.S.Components["marketplace"]) + "\n"
+	}
 	if a.S.Installed {
 		c, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
@@ -78,6 +81,13 @@ func (a *App) Status(ctx context.Context) string {
 }
 func (a *App) Diagnose(ctx context.Context) string {
 	text := a.Status(ctx)
+	if c := a.S.Components["marketplace"]; c != nil {
+		if err := a.checkMarketplace(c); err != nil {
+			text += "插件源异常: " + err.Error() + "\n"
+		} else {
+			text += "插件源: 配置已校验；运行中的 IDE 是否已重启需单独确认\n"
+		}
+	}
 	for _, f := range a.S.Files {
 		h, e := Hash(f.Path)
 		if e != nil || h != f.Hash {
@@ -159,23 +169,6 @@ func (a *App) PlanInstall(ctx context.Context, opt InstallOptions) (Inventory, I
 			return inv, opt, errors.New("不能把将被接管的扩展目录内CLI作为后台；请选择独立CLI")
 		}
 	}
-	if opt.Extension != nil {
-		ext := *opt.Extension
-		selected := false
-		for _, root := range opt.Roots {
-			selected = selected || root == filepath.Clean(ext.Root)
-		}
-		if !selected {
-			return inv, opt, errors.New("扩展安装目标必须属于本次明确选择接管的目录")
-		}
-		ext.Yes, ext.DryRun = opt.Yes, opt.DryRun
-		ext, e = a.PlanExtension(ctx, ext)
-		if e != nil {
-			return inv, opt, e
-		}
-		opt.Extension = &ext
-		fmt.Fprintf(a.Out, "安装 Codex 扩展: %s → %s（扩展由 IDE 管理，核心卸载时保留）\n", ext.Source, ext.Root)
-	}
 	fmt.Fprintf(a.Out, "后台: %s\nCodex: %s\n维护目录: %s\n", opt.Backend, opt.CodexPath, a.P.Data)
 	a.progress("下载设置：%s", a.Network.Summary())
 	for _, r := range opt.Roots {
@@ -183,6 +176,13 @@ func (a *App) PlanInstall(ctx context.Context, opt InstallOptions) (Inventory, I
 	}
 	if opt.Backend == "container" {
 		fmt.Fprintf(a.Out, "启动钩子: %s/codex-bg.sh；需持久化运行/用户/维护目录并由镜像执行\n", opt.EntrypointDir)
+	}
+	for _, name := range opt.Components {
+		if name == "marketplace" {
+			if e := a.planMarketplace(inv); e != nil {
+				return inv, opt, e
+			}
+		}
 	}
 	return inv, opt, nil
 }
@@ -334,11 +334,6 @@ func (a *App) installCore(ctx context.Context, opt InstallOptions) (err error) {
 			}
 		}
 	}()
-	if opt.Extension != nil {
-		if e = a.installExtensionLocked(ctx, *opt.Extension); e != nil {
-			return e
-		}
-	}
 	candidate := Candidate{}
 	a.progress("阶段 2/5 · 准备 Codex 运行环境")
 	if opt.CodexPath == "managed" {

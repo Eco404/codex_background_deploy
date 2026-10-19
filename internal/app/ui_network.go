@@ -65,7 +65,7 @@ func (m *uiModel) mirrorMenu() {
 	}
 	items = append(items, m.item("下一步：代理", func(m *uiModel) tea.Cmd { m.proxyMenu(); return nil }))
 	m.menu("下载设置 · 国内镜像地址", uiShow((*uiModel).networkMenu), items...)
-	m.note = "预填 npm / Node 为华为云，Miniconda 为中科大镜像。可按网络环境修改。Codex 扩展通过官方 Marketplace 下载，可单独使用代理。"
+	m.note = "预填 npm / Node 为华为云，Miniconda 为中科大镜像。可按网络环境修改。此处仅控制安装包下载；code-server 插件源在可选组件中单独配置。"
 }
 
 func (m *uiModel) proxyMenu() {

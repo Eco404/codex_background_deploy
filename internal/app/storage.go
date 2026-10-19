@@ -258,6 +258,11 @@ func (a *App) Lock() (func(), error) {
 		f.Close()
 		return nil, err
 	}
+	if err = a.cleanupMarketplaceReplacements(); err != nil {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+		return nil, err
+	}
 	return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
 }
 func (a *App) Run(ctx context.Context, name string, args ...string) ([]byte, error) {

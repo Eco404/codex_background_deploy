@@ -62,13 +62,18 @@ func (m *uiModel) componentInstallBlock(name string, installingCore bool) string
 		if unix.Access(m.inventory.MediaDir, unix.W_OK) != nil && !m.inventory.Privileged {
 			return "图标目录不可写，且没有可用的免密 sudo"
 		}
+	case "marketplace":
+		return marketplaceInstallBlock(m.inventory)
 	}
 	return ""
 }
 
 func (m *uiModel) componentNames() []string {
 	names := []string{"miniconda", "node", "codexapp"}
-	for _, name := range []string{"apti", "branding"} {
+	for _, name := range []string{"apti", "branding", "marketplace"} {
+		if name == "marketplace" && (!m.inventory.Container || m.inventory.CodeServerProduct == "") {
+			continue
+		}
 		if m.app.S.Components[name] != nil || m.componentInstallBlock(name, true) == "" {
 			names = append(names, name)
 		}
@@ -92,6 +97,9 @@ func (m *uiModel) componentActionBlock(action string) string {
 	}
 	if action == "install" {
 		return m.componentInstallBlock(m.component, false)
+	}
+	if m.component == "marketplace" && action == "repair" && os.Getenv("EXTENSIONS_GALLERY") != "" {
+		return "EXTENSIONS_GALLERY 正在覆盖插件源，请先处理容器环境配置"
 	}
 	if m.component == "codexapp" && action == "configure" {
 		if reason := m.coreBlock(); reason != "" {

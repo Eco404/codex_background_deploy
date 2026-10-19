@@ -113,7 +113,7 @@ func (a *App) Discover(ctx context.Context) (Inventory, error) {
 	}
 	inv.Apt = aptFound && dpkgFound
 	inv.Privileged = os.Geteuid() == 0
-	if !inv.Privileged && inv.Container && inv.Apt {
+	if !inv.Privileged && inv.Container {
 		_, err := a.probe(ctx, "sudo", "-n", "true")
 		inv.Privileged = err == nil
 	}
@@ -263,6 +263,12 @@ func (a *App) Discover(ctx context.Context) (Inventory, error) {
 	for kind, candidates := range inv.Candidates {
 		sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Compatible && !candidates[j].Compatible })
 		inv.Candidates[kind] = candidates
+	}
+	if inv.Container {
+		inv.CodeServerProduct = discoverCodeServerProduct(inv.Candidates["code-server"])
+		if inv.CodeServerProduct != "" && os.Getenv("EXTENSIONS_GALLERY") != "" {
+			inv.Warnings = append(inv.Warnings, "EXTENSIONS_GALLERY 环境变量覆盖插件源；请先在容器配置中处理该覆盖")
+		}
 	}
 	for _, p := range []string{filepath.Join(home, ".config/systemd/user/codex-app-server.service"), filepath.Join(home, ".config/systemd/user/codex-extension-hook.timer"), filepath.Join(home, "entrypoint.d/05-start-codex-daemon.sh"), filepath.Join(home, "apps/codex-daemon-bridge"), filepath.Join(home, ".local/share/codex-daemon-bridge"), filepath.Join(home, ".local/share/codex-background"), filepath.Join(home, ".codex/app-server-control/app-server-control.sock")} {
 		if _, e := os.Lstat(p); e == nil {

@@ -16,7 +16,7 @@
 部署管理
   安装后台 / 迁移现有部署（按检测结果显示其中一项；已安装后隐藏）
   可选组件 → 安装或复用 / 校验 / 卸载 / CodexApp 配置
-  为 code-server 添加 Codex 扩展（检测到 code-server 时）
+    微软官方插件源（仅 code-server 容器，默认不选）
   下载设置 → 官方源或国内镜像 / 代理
   更新核心、更新历史、回滚核心、卸载核心（已安装时显示）
 运行与维护
@@ -51,7 +51,7 @@
 
 默认优先采用实测可用的华为云源。2026-10-13 检查时，测试到的华为 Miniconda 地址返回 HTML 网页而非安装脚本，因此 Miniconda 采用中科大；可手动改为同样验证过 x64/ARM64 安装包的北外源 `https://mirrors.bfsu.edu.cn/anaconda/miniconda`。这里配置的是安装包镜像，不是 Conda 软件包 channel。下载结果会检查脚本头，网页响应不会交给 shell 执行。
 
-选择镜像后可逐项修改预填地址。Codex 镜像安装读取固定版本的原生架构包并校验 SHA512，核心仍不需要 Node/npm。Codex 扩展使用官方 Marketplace 来源；镜像选择不会替换插件库。代理独立选择“不使用”“输入代理地址”或“继承当前环境”，支持 HTTP(S) 和 SOCKS5；预览与日志不会显示代理密码。
+选择镜像后可逐项修改预填地址。Codex 镜像安装读取固定版本的原生架构包并校验 SHA512，核心仍不需要 Node/npm。镜像选择不会替换 IDE 插件库；code-server 的微软官方插件源是独立的可选组件。代理独立选择“不使用”“输入代理地址”或“继承当前环境”，支持 HTTP(S) 和 SOCKS5；预览与日志不会显示代理密码。
 
 ```bash
 ./codex-bg install --extension-root /path/extensions --mirrors --no-proxy
@@ -61,19 +61,26 @@
 
 CLI 默认使用官方源并沿用代理环境；修改仍需确认或显式 `--yes`。这些选项控制安装包下载与安装子进程，不修改日后的 apt、Conda channel 或其他用户软件配置。
 
-## 为 code-server 添加 Codex 扩展
+## code-server 的微软官方插件源
 
-在“部署管理”或安装向导的扩展目录选择页，选择“为 code-server 添加 Codex 扩展”。支持官方 Marketplace、本地 VSIX，或从已有 VS Code 复制来的原始扩展目录。目录来源需要保留 `package.json`、`.vsixmanifest` 和当前 Linux 架构的原生 Codex 入口；已经被后台工具替换的入口不能充当原件。
+在安装向导的“可选组件”，或“部署管理 → 可选组件”中选择“微软官方插件源 (marketplace)”。仅在容器内识别到 code-server 的安装目录时显示，默认不选。此选项把该 code-server 的整个插件库从 Open VSX 切换到微软官方 Marketplace，供用户在 IDE 中搜索、安装和更新插件；安装器不再单独下载或导入 Codex 插件，原 `extension install` 命令与 `--extension-source` 参数已移除。
 
 ```bash
-./codex-bg extension install --extension-root "$HOME/.local/share/code-server/extensions" --source marketplace
-./codex-bg extension install --extension-root "$HOME/.local/share/code-server/extensions" --source /path/openai.chatgpt.vsix
-./codex-bg extension install --extension-root "$HOME/.local/share/code-server/extensions" --source /path/openai.chatgpt-original-directory
-# 与核心一起安装并接管此根目录
-./codex-bg install --extension-root "$HOME/.local/share/code-server/extensions" --extension-source marketplace
+./codex-bg component install marketplace --dry-run
+./codex-bg component install marketplace
+./codex-bg component repair marketplace    # 校验；原插件源被镜像重置时重新应用
+./codex-bg component uninstall marketplace # 恢复原插件源，或解除复用记录
+# 与核心一起选择
+./codex-bg install --extension-root "$HOME/.local/share/code-server/extensions" --component marketplace
 ```
 
-下载或重打包后先检查扩展身份、平台与路径，再调用 code-server 的安装命令，由 IDE 检查版本兼容性。不会覆盖已有 Codex 扩展，也不会改变默认插件库；后续更新取决于 IDE 的插件库和扩展支持情况，本工具不提供更新来源替换。独立安装仅添加插件，不扩大已有后台的接管范围；安装向导中的目标则必须同时被明确选中。核心卸载保留插件，恢复其原入口。来源、包校验值及结果记录于 `installer-data/history/extension-*.json`。
+只备份并替换 code-server 自身 `lib/vscode/product.json` 的 `extensionsGallery` 对象，其他产品字段、用户设置和其他 IDE 不变。搜索地址为 `https://marketplace.visualstudio.com/_apis/public/gallery`；详情页使用 `https://marketplace.visualstudio.com/items`，资源使用微软的 `vscode-unpkg.net` 模板。原配置及校验信息登记在 `installer-data/backups`。已使用相同微软源时直接复用，不制造备份；解除引用也不会改动已有源。
+
+**启用或恢复后需要手动重启 code-server。** 安装器不重启当前 IDE；“配置已校验”不代表正在运行的 IDE 已重新加载。若容器设置了 `EXTENSIONS_GALLERY` 覆盖，先在容器启动配置中处理它，否则程序拒绝声称切源成功。安装器的代理选项仅用于安装包下载，不自动配置 IDE 日后的插件网络代理。插件能否安装或更新仍取决于 Marketplace 可用性、插件发布者及 code-server 的兼容性。
+
+在核心使用容器启动钩子、运行目录与维护目录均持久化的前提下，后台启动时会重新检查插件源：镜像重建将其恢复为已备份的原值时可重新应用；code-server 更新后的其他产品字段保留。遇到未知插件源、缺失备份或安装路径变化时停止改写并报告，需人工确认。复用的外部源只检查，不自动接管；源失效后可解除引用，再重新选择启用。仅单独启用本组件而未部署核心时，不创建额外启动钩子，可重建后手动执行 `component repair marketplace`。
+
+卸载此组件仅恢复插件源字段，保留 IDE 已安装的插件和其他产品字段；核心卸载不会隐式删除可选组件，需分别选择卸载。以前由旧版本安装的 Codex 扩展及其历史记录继续保留。原有后台接管功能仍只处理用户明确选择的扩展根目录。
 
 ## 工作方式
 
@@ -110,7 +117,7 @@ CLI 默认使用官方源并沿用代理环境；修改仍需确认或显式 `--
 
 ## 可选组件与外部环境
 
-Node、Miniconda、CodexApp 在普通Linux和容器都可选，默认关闭。容器额外提供满足能力条件的 apti 和code-server图标。已有兼容环境是默认推荐，亦可指定路径或安装受管版本。
+Node、Miniconda、CodexApp 在普通Linux和容器都可选，默认关闭。容器额外提供满足能力条件的 apti、code-server 图标和微软官方插件源。已有兼容环境是默认推荐，亦可指定路径或安装受管版本。
 
 ```bash
 ./codex-bg component list
@@ -204,8 +211,8 @@ CB_TEST_CODEX=/absolute/codex go test ./internal/app -run TestRuntimeRealCodex -
 # 安装界面：真实 PTY，模拟安装回调，不部署任何软件
 go test -c -o installer-data/tmp/ui-tests ./internal/app
 /path/to/venv/bin/python scripts/test_ui.py
-# 可选：真实 code-server 在隔离目录安装无功能测试扩展
-CODEX_BG_TEST_CODE_SERVER=/usr/lib/code-server/bin/code-server go test ./internal/app -run TestExtensionWithRealIsolatedCodeServer -count=1
+# 插件源：隔离临时安装目录内验证切换、恢复、镜像重置与失败保护
+go test ./internal/app -run Marketplace -count=1
 ```
 
 构建缓存、测试临时文件与报告均在installer-data下。发布物在dist含amd64/arm64二进制、SHA256SUMS、各架构完整tar.gz。安装包可直接解压运行；下载bootstrap通过 `CODEX_BG_DOWNLOAD_BASE=https://...` 指定真实发布地址，不硬编码未经发布的URL。包内checksum校验防止传输损坏，签名发布流程尚未建立。

@@ -27,6 +27,35 @@ func uiFind(t *testing.T, m *uiModel, label string) uiItem {
 	return uiItem{}
 }
 
+func TestUIMarketplaceConfirmationHasNoDownloadOrComponentInputs(t *testing.T) {
+	called := false
+	m := &uiModel{
+		ctx: context.Background(), app: &App{}, component: "marketplace", componentAction: "install",
+		actions: UIActions{Component: func(_ context.Context, action, name string, opts ComponentOptions) error {
+			called = true
+			if action != "install" || name != "marketplace" || opts.Path != "" || opts.Version != "" {
+				t.Fatalf("unexpected marketplace operation: %s %s %+v", action, name, opts)
+			}
+			return nil
+		}},
+	}
+	m.componentCandidates()
+	if called || m.screen != "confirm" || m.pending == nil || m.networkReady {
+		t.Fatalf("marketplace should directly preview a local operation before confirmation: screen=%s called=%v network=%v", m.screen, called, m.networkReady)
+	}
+	if !strings.Contains(m.detail, "重启 code-server") || !strings.Contains(m.detail, "备份") {
+		t.Fatal("marketplace preview omitted restart or recovery information")
+	}
+	uiKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if called {
+		t.Fatal("Enter must not apply marketplace change")
+	}
+	uiKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if !called {
+		t.Fatal("explicit confirmation did not apply marketplace change")
+	}
+}
+
 func TestUIUnavailableCoreActionsCannotBeSelected(t *testing.T) {
 	called := false
 	m := &uiModel{app: &App{}, actions: UIActions{Repair: func(context.Context) error { called = true; return nil }}}

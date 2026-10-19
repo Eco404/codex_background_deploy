@@ -33,6 +33,7 @@ type Inventory struct {
 	Privileged              bool
 	ServiceState            string
 	EntrypointDir, MediaDir string
+	CodeServerProduct       string
 	Candidates              map[string][]Candidate
 	Extensions              []Extension
 	Legacy                  []string
@@ -91,7 +92,6 @@ type Backup struct {
 	Deleted  bool      `json:"deleted,omitempty"`
 }
 type InstallOptions struct {
-	Extension                                       *ExtensionInstallOptions
 	Backend, CodexPath, CodexVersion, EntrypointDir string
 	Roots                                           []string
 	Yes, DryRun, Force, Linger                      bool
@@ -117,7 +117,6 @@ type App struct {
 // The UI invokes these same operations as CLI. No UI mutation logic.
 type UIActions struct {
 	Recover      func(context.Context) error
-	Extension    func(context.Context, ExtensionInstallOptions) error
 	Inventory    func(context.Context) (Inventory, error)
 	Status       func(context.Context) string
 	Install      func(context.Context, InstallOptions) error
