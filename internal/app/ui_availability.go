@@ -13,6 +13,26 @@ func directoryExists(path string) bool {
 	return err == nil && info.IsDir()
 }
 
+func serviceStateLabel(state string) string {
+	if label, ok := map[string]string{
+		"running": "正常运行", "starting": "正在启动", "retrying": "等待自动重试",
+		"exhausted": "重试额度已耗尽", "failed": "异常退出，等待手动启动",
+		"stopped": "已停止", "stopping": "正在确认停止", "stop_failed": "停止失败，进程状态待核实",
+		"maintenance": "维护中", "unknown": "无法确认",
+	}[state]; ok {
+		return label
+	}
+	return state
+}
+
+func coreUnavailable(state string) bool {
+	switch state {
+	case "stopped", "stopping", "stop_failed", "starting", "retrying", "exhausted", "failed", "maintenance":
+		return true
+	}
+	return false
+}
+
 func (m *uiModel) mutationBlock() string {
 	if hasPending(m.app.P.Data) {
 		return "存在未完成事务，请先在运行与维护中恢复"
@@ -42,8 +62,8 @@ func (m *uiModel) componentInstallBlock(name string, installingCore bool) string
 		if !installingCore && !m.app.S.Installed {
 			return "请先部署核心后台"
 		}
-		if !installingCore && m.inventory.ServiceState == "stopped" {
-			return "请先启动核心后台"
+		if !installingCore && coreUnavailable(m.inventory.ServiceState) {
+			return "核心后台尚未就绪（" + serviceStateLabel(m.inventory.ServiceState) + "）"
 		}
 	case "apti":
 		if !m.inventory.Container || !m.inventory.Apt {
@@ -105,8 +125,8 @@ func (m *uiModel) componentActionBlock(action string) string {
 		if reason := m.coreBlock(); reason != "" {
 			return reason
 		}
-		if m.inventory.ServiceState == "stopped" {
-			return "请先启动核心后台"
+		if coreUnavailable(m.inventory.ServiceState) {
+			return "核心后台尚未就绪（" + serviceStateLabel(m.inventory.ServiceState) + "）"
 		}
 	}
 	if action == "uninstall" && m.component == "node" {
@@ -143,11 +163,23 @@ func (m *uiModel) serviceBlock(action string) string {
 	if m.app.S.Backend == "systemd" && !m.inventory.Systemd {
 		return "无法连接 systemd 用户管理器"
 	}
-	if action == "start" && m.inventory.ServiceState == "running" {
-		return "后台已在运行"
+	state := m.inventory.ServiceState
+	if state == "maintenance" {
+		return "维护进行中，请先完成或恢复该操作"
 	}
-	if action != "start" && m.inventory.ServiceState == "stopped" {
-		return "后台已停止，请选择启动"
+	if (state == "stopping" || state == "stop_failed") && action != "stop" {
+		return "上次停止尚未完成，请先选择停止并核实进程已退出"
+	}
+	if action == "start" {
+		switch state {
+		case "running", "starting", "retrying":
+			return "后台" + serviceStateLabel(state) + "，无需重复启动"
+		}
+	} else {
+		switch state {
+		case "stopped", "exhausted", "failed":
+			return "后台" + serviceStateLabel(state) + "，请选择启动"
+		}
 	}
 	return ""
 }

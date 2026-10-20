@@ -60,6 +60,15 @@ func TestRuntimeRealCodex(t *testing.T) {
 	if busy, err := a.Busy(ctx); err != nil || busy {
 		t.Fatalf("empty isolated CLI: busy=%v err=%v", busy, err)
 	}
+	start, startErr := runtimeProcessStart(cmd.Process.Pid)
+	if startErr != nil {
+		t.Fatal(startErr)
+	}
+	owned := runtimeChildSocket(socket, runtimeChild{PID: cmd.Process.Pid, Start: start})
+	if owned == nil {
+
+		t.Fatal("real CLI socket ownership unavailable")
+	}
 	// A client disconnect must not own or stop the app-server process.
 	c, err := runtimeConnect(ctx, socket)
 	if err != nil {
@@ -72,4 +81,25 @@ func TestRuntimeRealCodex(t *testing.T) {
 	if err = a.Health(ctx); err != nil {
 		t.Fatalf("reconnect failed after client disconnect: %v", err)
 	}
+	// The real CLI publishes a symlink on recent releases. A crash leaves its
+	// entry behind; ownership proof must permit bounded cleanup of both entries.
+	if err = cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("isolated real CLI did not stop")
+	}
+	a.runtimeRemoveChildSocket(owned)
+	if _, err = os.Lstat(socket); !os.IsNotExist(err) {
+		t.Fatalf("real CLI crash entry remains: %v", err)
+	}
+	if owned.targetPath != "" {
+		if _, err = os.Lstat(owned.targetPath); !os.IsNotExist(err) {
+			t.Fatalf("real CLI crash target remains: %v", err)
+		}
+	}
+	// Cleanup's existing process-group helper expects to observe Wait completion.
+	done <- nil
 }

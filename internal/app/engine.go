@@ -42,12 +42,15 @@ func (a *App) Status(ctx context.Context) string {
 		text += "微软插件源: " + marketplaceSummary(a.S.Components["marketplace"]) + "\n"
 	}
 	if a.S.Installed {
-		c, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		if e = a.Health(c); e != nil {
-			text += "后台: 不健康 · " + e.Error() + "\n"
-		} else {
-			text += "后台: initialize 正常\n"
+		text += inv.RuntimeStatus.Summary(inv.ServiceState) + "\n"
+		if inv.ServiceState == "running" || inv.ServiceState == "starting" || inv.ServiceState == "unknown" {
+			c, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			if e = a.Health(c); e != nil {
+				text += "协议检查: 不健康 · " + e.Error() + "\n"
+			} else {
+				text += "协议检查: initialize 正常\n"
+			}
 		}
 	}
 	if _, e = os.Stat(a.P.Data); e != nil && a.S.Installed {
@@ -60,6 +63,9 @@ func (a *App) Status(ctx context.Context) string {
 		text += fmt.Sprintf("恢复材料缺失: %d项\n", len(a.S.RecoveryMissing))
 	}
 	for _, name := range []string{"health", "extras"} {
+		if name == "health" && inv.RuntimeStatus != nil && inv.RuntimeStatus.Recorded {
+			continue
+		}
 		if raw, e := os.ReadFile(filepath.Join(a.P.Runtime, "run", name+".json")); e == nil {
 			text += name + ": " + string(raw) + "\n"
 		}
@@ -81,6 +87,17 @@ func (a *App) Status(ctx context.Context) string {
 }
 func (a *App) Diagnose(ctx context.Context) string {
 	text := a.Status(ctx)
+	if a.S.Installed {
+		if _, err := os.Lstat(filepath.Join(a.S.CodexHome, "app-server-daemon", "app-server-updater.pid")); err == nil {
+			preview, err := a.PreviewLegacyUpdaterCleanup(ctx)
+			text += "旧 updater 检查: " + preview
+			if err != nil {
+				text += err.Error() + "\n"
+			} else {
+				text += "可用 cleanup-legacy-updater --dry-run 检查清理计划。\n"
+			}
+		}
+	}
 	if c := a.S.Components["marketplace"]; c != nil {
 		if err := a.checkMarketplace(c); err != nil {
 			text += "插件源异常: " + err.Error() + "\n"
@@ -170,6 +187,11 @@ func (a *App) PlanInstall(ctx context.Context, opt InstallOptions) (Inventory, I
 		}
 	}
 	fmt.Fprintf(a.Out, "后台: %s\nCodex: %s\n维护目录: %s\n", opt.Backend, opt.CodexPath, a.P.Data)
+	if opt.NoAutoRestart {
+		fmt.Fprintln(a.Out, "崩溃后自动重启: 关闭；异常退出后等待手动启动")
+	} else {
+		fmt.Fprintln(a.Out, "崩溃后自动重启: 开启；最多 5 次，退避 2/4/8/16/30 秒，连续健康 2 分钟后重置")
+	}
 	a.progress("下载设置：%s", a.Network.Summary())
 	for _, r := range opt.Roots {
 		fmt.Fprintf(a.Out, "接管扩展根目录: %s\n", r)
@@ -225,6 +247,9 @@ func (a *App) validateCodex(ctx context.Context, path string) (Candidate, error)
 	return Candidate{Kind: "codex", Path: real, Version: version, Source: "reused", Compatible: true}, nil
 }
 func (a *App) Install(ctx context.Context, opt InstallOptions) (err error) {
+	if opt.MigrateCodexApp {
+		return errors.New("旧 CodexApp 交接仅支持 migrate，不可用于 install")
+	}
 	a.progress("阶段 1/5 · 检查环境与安装计划")
 	inv, opt, e := a.PlanInstall(ctx, opt)
 	if e != nil {
@@ -307,22 +332,10 @@ func (a *App) installCore(ctx context.Context, opt InstallOptions) (err error) {
 		return e
 	}
 	defer unlock()
-	var t *Transaction
-	if hasPending(a.P.Data) {
-		raw, er := os.ReadFile(filepath.Join(a.P.Data, "transactions", "active.json"))
-		if er != nil {
-			return er
-		}
-		t = &Transaction{}
-		if er = json.Unmarshal(raw, t); er != nil {
-			return er
-		}
-		if t.Action != "migrate" {
-			return errors.New("先recover")
-		}
-	} else {
-		t, e = a.begin("install")
+	if a.S.Installed {
+		return errors.New("核心已被其他操作安装，请刷新状态")
 	}
+	t, e := a.begin("install")
 	if e != nil {
 		return e
 	}
@@ -334,6 +347,22 @@ func (a *App) installCore(ctx context.Context, opt InstallOptions) (err error) {
 			}
 		}
 	}()
+	if e = a.installCoreLocked(ctx, opt, t); e != nil {
+		return e
+	}
+	if e = a.commit(t); e != nil {
+		return e
+	}
+	a.event("installed", a.S.Backend)
+	a.progress("阶段 5/5 · 核心安装完成")
+	fmt.Fprintln(a.Out, "后台已安装；请Reload Window，首页会显示实际入口连接。")
+	return nil
+}
+
+// Caller owns the management lock and transaction. Migration commits only after
+// every dependent legacy service has also been handed over and verified.
+func (a *App) installCoreLocked(ctx context.Context, opt InstallOptions, t *Transaction) error {
+	var e error
 	candidate := Candidate{}
 	a.progress("阶段 2/5 · 准备 Codex 运行环境")
 	if opt.CodexPath == "managed" {
@@ -350,7 +379,16 @@ func (a *App) installCore(ctx context.Context, opt InstallOptions) (err error) {
 	a.S.EntrypointDir = opt.EntrypointDir
 	a.S.Installer = a.P.Installer
 	a.S.SelectedRoots = append([]string{}, opt.Roots...)
+	autoRestart := !opt.NoAutoRestart
+	a.S.AutoRestart = &autoRestart
 	if e = a.Save(); e != nil {
+		return e
+	}
+	mode := "installing"
+	if t.Action == "migrate" {
+		mode = "migrating"
+	}
+	if _, e = a.setRuntimeIntent("stopped", mode, t.ID, true); e != nil {
 		return e
 	}
 	exe, e := os.Executable()
@@ -373,6 +411,9 @@ func (a *App) installCore(ctx context.Context, opt InstallOptions) (err error) {
 	}
 	a.S.Installed = true
 	if e = a.Save(); e != nil {
+		return e
+	}
+	if _, e = a.setRuntimeIntent("running", mode, t.ID, true); e != nil {
 		return e
 	}
 	if e = a.Start(ctx); e != nil {
@@ -408,12 +449,6 @@ func (a *App) installCore(ctx context.Context, opt InstallOptions) (err error) {
 	if e = a.Save(); e != nil {
 		return e
 	}
-	if e = a.commit(t); e != nil {
-		return e
-	}
-	a.event("installed", a.S.Backend)
-	a.progress("阶段 5/5 · 核心安装完成")
-	fmt.Fprintln(a.Out, "后台已安装；请Reload Window，首页会显示实际入口连接。")
 	return nil
 }
 func unitQuote(s string) string {
@@ -422,7 +457,7 @@ func unitQuote(s string) string {
 func (a *App) installAdapter(ctx context.Context, t *Transaction) error {
 	if a.S.Backend == "systemd" {
 		path := filepath.Join(a.P.Home, ".config", "systemd", "user", "codex-bg.service")
-		unit := "[Unit]\nDescription=Codex background manager\n\n[Service]\nType=simple\nExecStart=" + unitQuote(a.P.Binary()) + " --home " + unitQuote(a.P.Home) + " --runtime " + unitQuote(a.P.Runtime) + " serve\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=25\nKillMode=control-group\nUMask=0077\nStandardOutput=null\nStandardError=null\n\n[Install]\nWantedBy=default.target\n"
+		unit := "[Unit]\nDescription=Codex background manager\nStartLimitIntervalSec=300\nStartLimitBurst=5\n\n[Service]\nType=simple\nExecStart=" + unitQuote(a.P.Binary()) + " --home " + unitQuote(a.P.Home) + " --runtime " + unitQuote(a.P.Runtime) + " serve\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=25\nKillMode=control-group\nUMask=0077\nStandardOutput=null\nStandardError=null\n\n[Install]\nWantedBy=default.target\n"
 		if _, e := os.Stat(path); e == nil && !a.S.Installed {
 			return errors.New("已有同名外部服务，拒绝覆盖")
 		}
@@ -439,7 +474,7 @@ func (a *App) installAdapter(ctx context.Context, t *Transaction) error {
 	if _, e := os.Stat(p); e == nil && !a.S.Installed {
 		return errors.New("容器钩子已被其他安装占用")
 	}
-	content := []byte("#!/bin/sh\n# codex-bg managed container startup\n" + shellQuote(a.P.Binary()) + " --home " + shellQuote(a.P.Home) + " --runtime " + shellQuote(a.P.Runtime) + " start --yes || { printf 'Codex background failed; inspect installer-data/logs\\n' >&2; exit 0; }\n")
+	content := []byte("#!/bin/sh\n# codex-bg managed container startup\n" + shellQuote(a.P.Binary()) + " --home " + shellQuote(a.P.Home) + " --runtime " + shellQuote(a.P.Runtime) + " autostart || { printf 'Codex background failed; inspect installer-data/logs\\n' >&2; exit 0; }\n")
 	return a.txWrite(t, p, content, 0755, "entrypoint")
 }
 func (a *App) Recover(ctx context.Context) error {
@@ -462,6 +497,22 @@ func (a *App) recoverLocked(ctx context.Context) error {
 	if e = json.Unmarshal(raw, &t); e != nil {
 		return e
 	}
+	if t.Action == "legacy-updater-cleanup" {
+		return a.recoverLegacyUpdaterCleanup(ctx, &t)
+	}
+	current, e := a.readRuntimeControl()
+	if e != nil {
+		return e
+	}
+	restoreRuntime := !t.Previous.Installed || t.Stage == "switching" || current.Operation == t.ID
+	if restoreRuntime {
+		if _, e = a.setRuntimeIntent("stopped", "recovering", t.ID, false); e != nil {
+			return e
+		}
+	}
+	if e = a.cleanupMigratedCodexApp(ctx, &t); e != nil {
+		return e
+	}
 	// Restore bindings created by this transaction before dependencies disappear.
 	old := map[string]bool{}
 	for _, b := range t.Previous.Bindings {
@@ -474,7 +525,7 @@ func (a *App) recoverLocked(ctx context.Context) error {
 			}
 		}
 	}
-	if a.S.Installed && (!t.Previous.Installed || t.Stage == "switching") {
+	if a.S.Installed && restoreRuntime {
 		if e = a.Stop(ctx); e != nil {
 			return e
 		}
@@ -574,10 +625,16 @@ func (a *App) recoverLocked(ctx context.Context) error {
 			return e
 		}
 	}
+	if e = a.restoreLegacyUpdater(ctx, &t); e != nil {
+		return e
+	}
 	if t.LegacyControl != "" {
 		if _, e = a.Run(ctx, "/bin/bash", t.LegacyControl, "start"); e != nil {
 			return e
 		}
+	}
+	if e = a.restoreLegacyCodexApp(ctx, &t); e != nil {
+		return e
 	}
 	// Keep explicitly installed components even when core selection fails.
 	components := a.S.Components
@@ -593,13 +650,16 @@ func (a *App) recoverLocked(ctx context.Context) error {
 	if e = a.Save(); e != nil {
 		return e
 	}
-	if a.S.Installed {
-		if e = a.Start(ctx); e != nil {
+	if restoreRuntime {
+		if e = a.restoreRuntimeIntent(ctx, &t); e != nil {
 			return e
 		}
 	}
 	if t.Action == "update" {
 		t.Action = "update-restored"
+	}
+	if t.Action == "migrate" {
+		t.Action = "migrate-restored"
 	}
 	return a.commit(&t)
 }
@@ -612,11 +672,34 @@ func (a *App) Service(ctx context.Context, action string, force bool) error {
 	if !a.S.Installed {
 		return errors.New("后台尚未安装；inspect可检查已有环境")
 	}
+	control, e := a.readRuntimeControl()
+	if e != nil {
+		return e
+	}
+	if hasPending(a.P.Data) || control.Mode != "normal" {
+		return errors.New("存在未完成维护；先 recover，不能启动或重置重试额度")
+	}
 	switch action {
 	case "start":
-		return a.Start(ctx)
+		if control.Status == "stopping" || control.Status == "stop_failed" {
+			return errors.New("停止尚未确认完成，请先重试 stop")
+		}
+		// Starting an already live supervisor is idempotent. Changing its
+		// generation here would interrupt the very tasks we are preserving.
+		if control.Desired == "running" && (control.Status == "running" || control.Status == "starting" || control.Status == "retrying") {
+			live := false
+			if a.S.Backend == "systemd" {
+				_, e := a.Run(ctx, "systemctl", "--user", "is-active", "--quiet", "codex-bg.service")
+				live = e == nil
+			} else if p, e := a.runtimeReadPID(); e == nil {
+				live = runtimeValidPID(p)
+			}
+			if live {
+				return a.Start(ctx)
+			}
+		}
 	case "stop", "restart":
-		if !force {
+		if !force && !a.runtimeKnownNotRunning() {
 			busy, e := a.Busy(ctx)
 			if e != nil {
 				return fmt.Errorf("不能确认后台空闲；明确 --force 才能中断: %w", e)
@@ -628,10 +711,18 @@ func (a *App) Service(ctx context.Context, action string, force bool) error {
 	default:
 		return errors.New("未知服务操作")
 	}
-	if e := a.Stop(ctx); e != nil {
+	if e := a.stopRuntimeFor(ctx, "normal", ""); e != nil {
 		return e
 	}
-	if action == "restart" {
+	if action == "start" || action == "restart" {
+		if _, e := a.setRuntimeIntent("running", "normal", "", true); e != nil {
+			return e
+		}
+		if a.S.Backend == "systemd" {
+			if _, e := a.Run(ctx, "systemctl", "--user", "reset-failed", "codex-bg.service"); e != nil {
+				return e
+			}
+		}
 		return a.Start(ctx)
 	}
 	return nil
@@ -646,10 +737,10 @@ func (a *App) Update(ctx context.Context, version string, force bool) (err error
 	if version != "" && a.S.Codex.Source != "managed" {
 		return errors.New("外部Codex只复用，不自动升级")
 	}
-	if !force {
+	if !force && !a.runtimeKnownNotRunning() {
 		b, e := a.Busy(ctx)
 		if e != nil || b {
-			return errors.New("后台忙碌或无法确认空闲；更新未应用")
+			return fmt.Errorf("%w：后台忙碌或无法确认空闲；更新未应用", errUpdateBusy)
 		}
 	}
 	unlock, e := a.Lock()
@@ -684,34 +775,41 @@ func (a *App) Update(ctx context.Context, version string, force bool) (err error
 		}
 		a.S.Codex = c
 	}
-	exe, e := os.Executable()
+	// Pin the bytes of this running Linux executable. A long idle wait must
+	// not silently deploy a different build later placed at the same pathname.
+	data, e := os.ReadFile("/proc/self/exe")
 	if e != nil {
 		return e
 	}
-	data, e := os.ReadFile(exe)
-	if e != nil {
-		return e
-	}
-	if !force {
+	if !force && !a.runtimeKnownNotRunning() {
 		busy, e := a.Busy(ctx)
 		if e != nil || busy {
-			return errors.New("准备期间出现活跃任务，暂不切换")
+			return fmt.Errorf("%w：准备期间出现活跃任务或无法确认空闲，暂不切换", errUpdateBusy)
 		}
 	}
 	t.Stage = "switching"
 	if e = a.saveTx(t); e != nil {
 		return e
 	}
-	if e = a.Stop(ctx); e != nil {
+	if e = a.stopRuntimeFor(ctx, "updating", t.ID); e != nil {
 		return e
 	}
+	if a.S.AutoRestart == nil {
+		enabled := true
+		a.S.AutoRestart = &enabled
+	}
 	if e = a.txWrite(t, a.P.Binary(), data, 0755, "binary"); e != nil {
+		return e
+	}
+	// Older Go hooks invoked an explicit start on boot. Refresh them as part
+	// of the same transaction so stopped/exhausted intent survives rebuilds.
+	if e = a.installAdapter(ctx, t); e != nil {
 		return e
 	}
 	if e = a.Save(); e != nil {
 		return e
 	}
-	if e = a.Start(ctx); e != nil {
+	if e = a.resumeRuntimeAfterMaintenance(ctx, t.PreviousControl, "updating", t.ID); e != nil {
 		return e
 	}
 	return a.commit(t)
@@ -731,7 +829,7 @@ func (a *App) Rollback(ctx context.Context, id string, force bool) error {
 	if t.Action != "update" {
 		return errors.New("只能回退update事务")
 	}
-	if !force {
+	if !force && !a.runtimeKnownNotRunning() {
 		busy, e := a.Busy(ctx)
 		if e != nil || busy {
 			return errors.New("无法确认空闲，未回退")
@@ -745,7 +843,21 @@ func (a *App) Rollback(ctx context.Context, id string, force bool) error {
 	if hasPending(a.P.Data) {
 		return errors.New("先恢复未完成事务")
 	}
+	// Rollback restores old files, but preserves the user's current running
+	// intent and retry budget, not those from the historical update day.
+	control, e := a.readRuntimeControl()
+	if e != nil {
+		return e
+	}
+	if control.Mode != "normal" {
+		return errors.New("后台处于维护状态，请先 recover")
+	}
+	t.PreviousControl = &control
+	t.Stage = "switching"
 	if e = a.saveTx(&t); e != nil {
+		return e
+	}
+	if _, e = a.setRuntimeIntent("stopped", "rolling_back", t.ID, false); e != nil {
 		return e
 	}
 	return a.recoverLocked(ctx)
@@ -760,7 +872,7 @@ func (a *App) Uninstall(ctx context.Context, force bool) error {
 	if e := a.checkManaged(); e != nil {
 		return e
 	}
-	if !force {
+	if !force && !a.runtimeKnownNotRunning() {
 		busy, e := a.Busy(ctx)
 		if e != nil || busy {
 			return errors.New("后台忙碌或状态未知；未卸载")
@@ -786,6 +898,9 @@ func (a *App) Uninstall(ctx context.Context, force bool) error {
 				return fmt.Errorf("恢复材料缺失 %s；保留后台", b.Entry)
 			}
 		}
+	}
+	if _, e = a.setRuntimeIntent("stopped", "uninstalling", "", false); e != nil {
+		return e
 	}
 	for _, r := range append([]string{}, a.S.SelectedRoots...) {
 		if e = a.DetachRoot(ctx, r); e != nil {
@@ -818,6 +933,12 @@ func (a *App) Uninstall(ctx context.Context, force bool) error {
 	a.S.Installed = false
 	a.S.Files = nil
 	a.S.LingerOwned = false
+	if _, e = a.setRuntimeIntent("stopped", "normal", "", false); e != nil {
+		return e
+	}
+	if _, e = a.updateRuntimeControl("", func(c *runtimeControl) error { c.Status = "stopped"; c.Child = nil; return nil }); e != nil {
+		return e
+	}
 	if e := a.Save(); e != nil {
 		return e
 	}

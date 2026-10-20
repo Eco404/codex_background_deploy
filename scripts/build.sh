@@ -15,6 +15,9 @@ chmod 755 codex-bg
 for arch in amd64 arm64; do
   stage="installer-data/tmp/package-$arch"
   mkdir -p "$stage/codex-background-deploy/dist"
+  # Migration validates an installed v3 controller against this saved source.
+  mkdir -p "$stage/codex-background-deploy/legacy/v3/payload"
+  cp legacy/v3/payload/control.sh "$stage/codex-background-deploy/legacy/v3/payload/"
   cp install.sh README.md "$stage/codex-background-deploy/"
   cp "dist/codex-bg-linux-$arch" "$stage/codex-background-deploy/codex-bg"
   cp "dist/codex-bg-linux-$arch" dist/SHA256SUMS "$stage/codex-background-deploy/dist/"

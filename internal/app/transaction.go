@@ -14,16 +14,19 @@ type TxResource struct {
 	Deleted              bool
 }
 type Transaction struct {
-	ID, Action     string
-	Started        time.Time
-	Previous       State
-	Resources      []TxResource
-	NewBindings    []string
-	Stage          string
-	LegacyUnits    []LegacyUnit
-	LegacySettings []LegacySetting
-	LegacyControl  string
-	LegacyDaemon   string
+	ID, Action      string
+	Started         time.Time
+	Previous        State
+	Resources       []TxResource
+	NewBindings     []string
+	Stage           string
+	LegacyUnits     []LegacyUnit
+	LegacySettings  []LegacySetting
+	LegacyControl   string
+	LegacyDaemon    string
+	LegacyUpdater   *LegacyUpdaterPlan `json:",omitempty"`
+	LegacyCodexApp  *LegacyCodexAppPlan
+	PreviousControl *runtimeControl `json:",omitempty"`
 }
 type LegacyUnit struct {
 	Name            string
@@ -52,7 +55,14 @@ func (a *App) begin(action string) (*Transaction, error) {
 	raw, _ := json.Marshal(a.S)
 	var old State
 	_ = json.Unmarshal(raw, &old)
-	t := &Transaction{ID: ID(), Action: action, Started: time.Now().UTC(), Previous: old}
+	control, e := a.readRuntimeControl()
+	if e != nil {
+		return nil, e
+	}
+	if a.S.Installed && control.Mode != "normal" {
+		return nil, errors.New("后台处于维护状态，请先 recover")
+	}
+	t := &Transaction{ID: ID(), Action: action, Started: time.Now().UTC(), Previous: old, PreviousControl: &control}
 	return t, a.saveTx(t)
 }
 func (a *App) txWrite(t *Transaction, path string, data []byte, mode os.FileMode, kind string) error {
@@ -104,6 +114,16 @@ func (a *App) commit(t *Transaction) error {
 			if e = a.SaveBackup(backup); e != nil {
 				return e
 			}
+		}
+	}
+	control, e := a.readRuntimeControl()
+	if e != nil {
+		return e
+	}
+	if control.Operation == t.ID {
+		requireRunning := a.S.Installed && (t.Action == "install" || t.Action == "migrate" || t.PreviousControl == nil || (t.PreviousControl.Desired == "running" && t.PreviousControl.Status != "failed" && t.PreviousControl.Status != "exhausted"))
+		if e = a.finishRuntimeMaintenance(requireRunning); e != nil {
+			return e
 		}
 	}
 	return os.Remove(filepath.Join(a.P.Data, "transactions", "active.json"))

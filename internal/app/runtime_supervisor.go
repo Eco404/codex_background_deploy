@@ -23,6 +23,7 @@ type runtimePID struct {
 	UID     int    `json:"uid"`
 	Binary  string `json:"binary"`
 	Runtime string `json:"runtime"`
+	BootID  string `json:"boot_id,omitempty"`
 }
 
 func runtimeProcessStart(pid int) (string, error) {
@@ -43,6 +44,12 @@ func runtimeProcessStart(pid int) (string, error) {
 func runtimeValidPID(record runtimePID) bool {
 	if record.PID <= 1 || record.UID != os.Getuid() {
 		return false
+	}
+	if record.BootID != "" {
+		boot, err := runtimeBootID()
+		if err != nil || boot != record.BootID {
+			return false
+		}
 	}
 	started, err := runtimeProcessStart(record.PID)
 	if err != nil || started != record.Start {
@@ -114,13 +121,22 @@ func runtimeWait(ctx context.Context, d time.Duration) error {
 	}
 }
 func (a *App) Start(ctx context.Context) error {
+	control, err := a.readRuntimeControl()
+	if err != nil {
+		return err
+	}
+	if !runtimeMayLaunch(control) {
+		return fmt.Errorf("后台状态为 %s（%s），需显式启动或恢复维护", control.Status, control.Mode)
+	}
 	if len([]byte(a.P.Socket)) > 107 {
 		return errors.New("app-server Unix socket path exceeds Linux 107-byte limit; choose a shorter HOME/runtime path")
 	}
 	if a.S.Backend == "systemd" {
 		if _, socketErr := os.Lstat(a.P.Socket); socketErr == nil {
 			if _, activeErr := a.Run(ctx, "systemctl", "--user", "is-active", "--quiet", "codex-bg.service"); activeErr != nil {
-				return errors.New("socket exists while managed systemd service is inactive; refusing to start")
+				if _, proofErr := a.readRuntimeSocketOwnership(); proofErr != nil {
+					return errors.New("socket exists without recovery evidence; refusing to start")
+				}
 			}
 		}
 		if _, err := a.Run(ctx, "systemctl", "--user", "start", "codex-bg.service"); err != nil {
@@ -135,11 +151,12 @@ func (a *App) Start(ctx context.Context) error {
 		}
 		record, readErr := a.runtimeReadPID()
 		if readErr != nil || !runtimeValidPID(record) {
+			// Serve owns the supervisor lock and validates registered stale socket
+			// evidence before cleanup. The launcher cannot safely do either.
 			if _, socketErr := os.Lstat(a.P.Socket); socketErr == nil {
-				return errors.New("socket exists without a verified supervisor; refusing to start")
-			}
-			if readErr == nil {
-				_ = os.Remove(a.runtimePIDFile())
+				if _, proofErr := a.readRuntimeSocketOwnership(); proofErr != nil {
+					return errors.New("socket exists without recovery evidence; refusing to start")
+				}
 			}
 			cmd := exec.Command(a.P.Binary(), "--home", a.P.Home, "--runtime", a.P.Runtime, "serve")
 			cmd.Env = runtimeEnv(a.P.Home, a.S.CodexHome)
@@ -155,10 +172,49 @@ func (a *App) Start(ctx context.Context) error {
 			go func() { _ = cmd.Wait() }()
 		}
 	}
-	healthCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	readyWait := 15 * time.Second
+	if !control.Launch {
+		if control.Status == "running" || control.Status == "starting" {
+			readyWait += runtimeBackoff(control.Retries + 1)
+		} else if remaining := time.Until(control.NextRetry); remaining > 0 {
+			// A persisted retry timer may exceed the ordinary startup timeout.
+			// Waiting never resets or advances the supervisor's retry allowance.
+			if remaining > 30*time.Second {
+				remaining = 30 * time.Second
+			}
+			readyWait += remaining
+		}
+	}
+	healthCtx, cancel := context.WithTimeout(ctx, readyWait)
 	defer cancel()
 	for {
-		if err := a.Health(healthCtx); err == nil {
+		current, err := a.readRuntimeControl()
+		if err != nil {
+			return err
+		}
+		if current.Generation != control.Generation {
+			return errRuntimeSuperseded
+		}
+		if current.Desired != "running" || current.Status == "failed" || current.Status == "exhausted" {
+			return fmt.Errorf("后台启动停止：%s；请检查状态与日志", current.Status)
+		}
+		if current.Status == "running" && current.Child != nil && a.Health(healthCtx) == nil {
+			// A compatible listener is not enough: a foreign process may have
+			// claimed this pathname while the child was launching. Confirm the
+			// same generation and the kernel's child/socket ownership evidence.
+			ready, err := a.readRuntimeControl()
+			if err != nil {
+				return err
+			}
+			if ready.Generation != control.Generation {
+				return errRuntimeSuperseded
+			}
+			if ready.Status != "running" || ready.Desired != "running" || ready.Child == nil || *ready.Child != *current.Child || runtimeChildSocket(a.P.Socket, *ready.Child) == nil {
+				if err := runtimeWait(healthCtx, 150*time.Millisecond); err != nil {
+					return fmt.Errorf("app-server ownership did not become ready: %w", err)
+				}
+				continue
+			}
 			if a.S.Backend == "container" {
 				a.runtimeOptionalStart(ctx)
 			}
@@ -189,19 +245,18 @@ func (a *App) Stop(ctx context.Context) error {
 	}
 	record, err := a.runtimeReadPID()
 	if errors.Is(err, os.ErrNotExist) {
-		if _, socketErr := os.Stat(a.P.Socket); socketErr == nil {
-			return errors.New("socket exists without a known supervisor; refusing to remove or signal unknown service")
-		}
-		return nil
+		return a.runtimeCleanupStoppedSupervisor(nil)
 	}
 	if err != nil {
 		return err
 	}
 	if !runtimeValidPID(record) {
-		return errors.New("supervisor PID identity changed; refusing to signal it")
+		return a.runtimeCleanupStoppedSupervisor(&record)
 	}
 	if err = syscall.Kill(record.PID, syscall.SIGTERM); err != nil {
-		return err
+		if !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
 	}
 	deadline, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -211,10 +266,7 @@ func (a *App) Stop(ctx context.Context) error {
 		}
 	}
 	// Serve removes its own socket and PID, after stopping the app-server group.
-	if _, err = os.Stat(a.P.Socket); err == nil {
-		return errors.New("socket remains after supervisor exit; preserve runtime and inspect")
-	}
-	return nil
+	return a.runtimeCleanupStoppedSupervisor(&record)
 }
 
 // Kill the private session created for exactly this child. Descendant git/helper
@@ -256,15 +308,28 @@ func (a *App) Serve(ctx context.Context) error {
 	if len([]byte(a.P.Socket)) > 107 {
 		return errors.New("Unix socket path exceeds 107 bytes")
 	}
-	if _, err = os.Stat(a.P.Socket); err == nil {
-		// Never unlink an existing responsive or unknown listener during startup.
-		return errors.New("app-server socket already exists; inspect stale or competing runtime before starting")
+	control, err := a.readRuntimeControl()
+	if err != nil {
+		return err
 	}
+	if !runtimeMayLaunch(control) {
+		a.runtimeControlStatus(control, 0, "")
+		return nil
+	}
+	if err = a.recoverRuntimeSocketLocked(control.Generation); err != nil {
+		a.runtimeStatus("socket-recovery", map[string]any{"ok": false, "code": "ownership_unavailable"})
+		return err
+	}
+
 	started, err := runtimeProcessStart(os.Getpid())
 	if err != nil {
 		return err
 	}
-	record := runtimePID{PID: os.Getpid(), Start: started, UID: os.Getuid(), Binary: a.P.Binary(), Runtime: a.P.Runtime}
+	bootID, err := runtimeBootID()
+	if err != nil {
+		return err
+	}
+	record := runtimePID{PID: os.Getpid(), Start: started, UID: os.Getuid(), Binary: a.P.Binary(), Runtime: a.P.Runtime, BootID: bootID}
 	data, _ := json.Marshal(record)
 	if err = os.WriteFile(a.runtimePIDFile(), data, 0600); err != nil {
 		return err
@@ -278,70 +343,7 @@ func (a *App) Serve(ctx context.Context) error {
 	watchApp := *a
 	go func() { defer watcherWG.Done(); _ = watchApp.Reload(); watchApp.runtimeWatch(runCtx) }()
 	defer func() { cancel(); watcherWG.Wait() }()
-	failures := 0
-	for {
-		if err = ctx.Err(); err != nil {
-			return nil
-		}
-		// Keep the selected CLI identity stable for this supervisor lifetime.
-		// Maintenance explicitly restarts the supervisor after publishing changes.
-		log := a.RuntimeLog("app-server")
-		cmd := exec.Command(codexPath, "app-server", "--listen", "unix://"+a.P.Socket)
-		cmd.Env = runtimeEnv(runtimeHome, codexHome)
-		cmd.Stdin = nil
-		cmd.Stdout = log
-		cmd.Stderr = log
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-		cmd.WaitDelay = time.Second
-		launched := time.Now()
-		startErr := cmd.Start()
-		exitCode := -1
-		if startErr == nil {
-			a.runtimeStatus("health", map[string]any{"status": "running", "consecutive_failures": failures, "pid": cmd.Process.Pid})
-			done := make(chan error, 1)
-			go func() { done <- cmd.Wait() }()
-			stable := time.NewTimer(30 * time.Second)
-			running := true
-			for running {
-				select {
-				case <-ctx.Done():
-					stable.Stop()
-					runtimeStopChild(cmd, done)
-					if st, e := os.Lstat(a.P.Socket); e == nil && st.Mode()&os.ModeSocket != 0 {
-						_ = os.Remove(a.P.Socket)
-					}
-					log.Close()
-					a.runtimeStatus("health", map[string]any{"status": "stopped", "consecutive_failures": 0})
-					return nil
-				case <-stable.C:
-					failures = 0
-					a.runtimeStatus("health", map[string]any{"status": "running", "consecutive_failures": 0, "pid": cmd.Process.Pid})
-				case <-done:
-					stable.Stop()
-					exitCode = cmd.ProcessState.ExitCode()
-					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-					running = false
-				}
-			}
-		}
-		log.Close()
-		if time.Since(launched) >= 30*time.Second {
-			failures = 0
-		}
-		failures++
-		delay := runtimeBackoff(failures)
-		a.runtimeStatus("health", map[string]any{"status": "retrying", "consecutive_failures": failures, "exit_code": exitCode, "retry_seconds": int(delay / time.Second), "start_failed": startErr != nil})
-
-		// Codex removes its Unix socket on normal exit. A socket remaining after a
-		// crash is only removed here, under our lifetime supervisor lock.
-		if st, e := os.Lstat(a.P.Socket); e == nil && st.Mode()&os.ModeSocket != 0 {
-			_ = os.Remove(a.P.Socket)
-		}
-		if err = runtimeWait(ctx, delay); err != nil {
-			return nil
-		}
-	}
+	return a.superviseCodex(ctx, codexPath, codexHome, runtimeHome, defaultRuntimeRestartPolicy())
 }
 
 // Only bounded metadata is persisted here; never store an error's text because

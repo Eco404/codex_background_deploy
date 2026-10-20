@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# Do not enable `set -u` here: nvm.sh is not nounset-safe.
+
+export HOME="${HOME:-/home/coder}"
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+    # shellcheck disable=SC1090
+    . "$NVM_DIR/nvm.sh"
+    nvm use --silent default >/dev/null 2>&1 || nvm use --silent --lts >/dev/null 2>&1 || true
+fi
+
+export PATH="$HOME/.local/bin:$PATH"
+export CODEXUI_CODEX_COMMAND="$HOME/apps/codex-daemon-bridge/codex"
+
+APP_DIR="$HOME/apps/codexapp"
+CODEXAPP="$APP_DIR/node_modules/.bin/codexapp"
+SYNC_AUTH="$APP_DIR/sync-codex-auth.mjs"
+PORT="${CODEXAPP_PORT:-8214}"
+LOG_DIR="$HOME/.local/state/codexapp"
+LOG_FILE="$LOG_DIR/output.log"
+PID_FILE="$LOG_DIR/codexapp.pid"
+PASSWORD_FILE="$HOME/.config/codexapp/webui-password"
+
+mkdir -p "$LOG_DIR"
+
+is_codexapp_pid() {
+    local pid="${1:-}"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+
+    # On Linux, verify the PID still belongs to this CodexApp executable so a
+    # recycled PID cannot be mistaken for the managed process.
+    if [ -r "/proc/$pid/cmdline" ]; then
+        tr '\0' ' ' < "/proc/$pid/cmdline" | grep -Fq "$CODEXAPP" || return 1
+    fi
+    return 0
+}
+
+http_ready() {
+    command -v curl >/dev/null 2>&1 || return 2
+    local code
+    code="$(curl -sS -o /dev/null --max-time 2 -w '%{http_code}' "http://127.0.0.1:$PORT/" 2>/dev/null || true)"
+    [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+find_legacy_codexapp_pid() {
+    command -v pgrep >/dev/null 2>&1 || return 1
+    local pid
+    while IFS= read -r pid; do
+        if is_codexapp_pid "$pid"; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+    done < <(pgrep -f "$CODEXAPP" 2>/dev/null || true)
+    return 1
+}
+
+if command -v node >/dev/null 2>&1 && [ -f "$SYNC_AUTH" ]; then
+    if node "$SYNC_AUTH" >> "$LOG_FILE" 2>&1; then
+        echo "$(date -Is) codex auth synced" >> "$LOG_FILE"
+    else
+        echo "$(date -Is) WARNING: codex auth sync failed" >> "$LOG_FILE"
+    fi
+else
+    echo "$(date -Is) WARNING: node or auth sync script unavailable; auth sync skipped" >> "$LOG_FILE"
+fi
+
+if [ ! -x "$CODEXAPP" ]; then
+    echo "$(date -Is) codexapp not found: $CODEXAPP" >> "$LOG_FILE"
+    exit 0
+fi
+
+existing_pid=""
+if [ -s "$PID_FILE" ]; then
+    existing_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if ! is_codexapp_pid "$existing_pid"; then
+        echo "$(date -Is) removing stale codexapp pid file: ${existing_pid:-invalid}" >> "$LOG_FILE"
+        rm -f "$PID_FILE"
+        existing_pid=""
+    fi
+fi
+
+# Adopt an instance started by an older version of this installer so upgrading
+# the start script does not launch a second server on the same port.
+if [ -z "$existing_pid" ]; then
+    existing_pid="$(find_legacy_codexapp_pid || true)"
+    if [ -n "$existing_pid" ]; then
+        printf '%s\n' "$existing_pid" > "$PID_FILE"
+        echo "$(date -Is) adopted existing codexapp process, pid=$existing_pid" >> "$LOG_FILE"
+    fi
+fi
+
+if [ -n "$existing_pid" ]; then
+    if http_ready; then
+        echo "$(date -Is) codexapp already running and HTTP ready, pid=$existing_pid, port=$PORT" >> "$LOG_FILE"
+    else
+        rc=$?
+        if [ "$rc" -eq 2 ]; then
+            echo "$(date -Is) codexapp already running, pid=$existing_pid (curl unavailable; HTTP check skipped)" >> "$LOG_FILE"
+        else
+            echo "$(date -Is) codexapp process already running but HTTP is not ready yet, pid=$existing_pid, port=$PORT" >> "$LOG_FILE"
+        fi
+    fi
+    exit 0
+fi
+
+cd "$APP_DIR" || exit 0
+
+CODEXAPP_ARGS=(
+    --no-login
+    --no-tunnel
+    --no-open
+    --port "$PORT"
+)
+
+# Use the installer-managed password file. Do not print the password to logs.
+if [ -s "$PASSWORD_FILE" ]; then
+    CODEXAPP_PASSWORD="$(cat "$PASSWORD_FILE")"
+    if [ -n "$CODEXAPP_PASSWORD" ]; then
+        CODEXAPP_ARGS+=(--password "$CODEXAPP_PASSWORD")
+        echo "$(date -Is) codexapp WebUI password source: installer-managed file" >> "$LOG_FILE"
+    else
+        echo "$(date -Is) WARNING: codexapp password file is empty; using CodexApp default" >> "$LOG_FILE"
+    fi
+    unset CODEXAPP_PASSWORD
+else
+    echo "$(date -Is) WARNING: codexapp password file missing; using CodexApp default" >> "$LOG_FILE"
+fi
+
+nohup "$CODEXAPP" \
+    "${CODEXAPP_ARGS[@]}" \
+    >> "$LOG_FILE" 2>&1 &
+
+codexapp_pid=$!
+printf '%s\n' "$codexapp_pid" > "$PID_FILE"
+echo "$(date -Is) codexapp launched, pid=$codexapp_pid" >> "$LOG_FILE"
+
+# Wait briefly for a real HTTP response instead of treating process creation as
+# proof that the WebUI is ready. Any non-000 HTTP status means the server is up.
+if command -v curl >/dev/null 2>&1; then
+    for _ in $(seq 1 20); do
+        if ! is_codexapp_pid "$codexapp_pid"; then
+            echo "$(date -Is) WARNING: codexapp exited before becoming ready, pid=$codexapp_pid" >> "$LOG_FILE"
+            rm -f "$PID_FILE"
+            exit 0
+        fi
+        if http_ready; then
+            echo "$(date -Is) codexapp HTTP ready, pid=$codexapp_pid, port=$PORT" >> "$LOG_FILE"
+            exit 0
+        fi
+        sleep 0.5
+    done
+    echo "$(date -Is) WARNING: codexapp process is alive but HTTP readiness timed out, pid=$codexapp_pid, port=$PORT" >> "$LOG_FILE"
+else
+    echo "$(date -Is) codexapp started, pid=$codexapp_pid (curl unavailable; HTTP check skipped)" >> "$LOG_FILE"
+fi

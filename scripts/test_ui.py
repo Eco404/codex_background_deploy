@@ -76,7 +76,7 @@ def scenario(name, width, cancel=None):
             send(b"\x1b[B\x1b[B\r", "Codex 运行时")
             send(b"\r", "systemd 用户服务")
             send(b"\r", "预览并确认")
-            send(b"\x1b[B\x1b[B\x1b[B\x1b[B\r", "使用官方源")
+            send(b"\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r", "使用官方源")
             send(b"\r", "不使用代理")
             send(b"\r", "确认继续")
             send(b"y", "步骤 1/4")

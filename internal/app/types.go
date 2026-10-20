@@ -32,6 +32,7 @@ type Inventory struct {
 	Container, Systemd, Apt bool
 	Privileged              bool
 	ServiceState            string
+	RuntimeStatus           *RuntimeStatus `json:"runtime_status,omitempty"`
 	EntrypointDir, MediaDir string
 	CodeServerProduct       string
 	Candidates              map[string][]Candidate
@@ -78,6 +79,7 @@ type State struct {
 	SelectedRoots   []string              `json:"selected_roots"`
 	RecoveryMissing []string              `json:"recovery_missing,omitempty"`
 	LingerOwned     bool                  `json:"linger_owned"`
+	AutoRestart     *bool                 `json:"auto_restart,omitempty"`
 }
 type Backup struct {
 	ID       string    `json:"id"`
@@ -92,6 +94,8 @@ type Backup struct {
 	Deleted  bool      `json:"deleted,omitempty"`
 }
 type InstallOptions struct {
+	NoAutoRestart                                   bool
+	MigrateCodexApp                                 bool
 	Backend, CodexPath, CodexVersion, EntrypointDir string
 	Roots                                           []string
 	Yes, DryRun, Force, Linger                      bool
@@ -116,20 +120,24 @@ type App struct {
 
 // The UI invokes these same operations as CLI. No UI mutation logic.
 type UIActions struct {
-	Recover      func(context.Context) error
-	Inventory    func(context.Context) (Inventory, error)
-	Status       func(context.Context) string
-	Install      func(context.Context, InstallOptions) error
-	Migrate      func(context.Context, InstallOptions) error
-	Diagnose     func(context.Context) string
-	Repair       func(context.Context) error
-	Service      func(context.Context, string, bool) error
-	Update       func(context.Context, string, bool) error
-	Rollback     func(context.Context, string, bool) error
-	Uninstall    func(context.Context, bool) error
-	Component    func(context.Context, string, string, ComponentOptions) error
-	Backups      func() ([]Backup, error)
-	BackupAction func(context.Context, string, string, bool) error
-	DataAction   func(context.Context, string, string) error
-	Logs         func() string
+	PreviewLegacyUpdater func(context.Context) (string, error)
+	CleanupLegacyUpdater func(context.Context, bool) error
+	UpdateWhenIdle       func(context.Context, string, time.Duration) error
+	PreviewMigration     func(context.Context, InstallOptions) (string, error)
+	Recover              func(context.Context) error
+	Inventory            func(context.Context) (Inventory, error)
+	Status               func(context.Context) string
+	Install              func(context.Context, InstallOptions) error
+	Migrate              func(context.Context, InstallOptions) error
+	Diagnose             func(context.Context) string
+	Repair               func(context.Context) error
+	Service              func(context.Context, string, bool) error
+	Update               func(context.Context, string, bool) error
+	Rollback             func(context.Context, string, bool) error
+	Uninstall            func(context.Context, bool) error
+	Component            func(context.Context, string, string, ComponentOptions) error
+	Backups              func() ([]Backup, error)
+	BackupAction         func(context.Context, string, string, bool) error
+	DataAction           func(context.Context, string, string) error
+	Logs                 func() string
 }

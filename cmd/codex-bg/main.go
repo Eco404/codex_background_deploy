@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"codex-bg/internal/app"
 	"golang.org/x/term"
@@ -76,7 +77,7 @@ func run(ctx context.Context, args []string) error {
 			fmt.Print(a.Status(ctx))
 			return nil
 		}
-		return app.RunUI(ctx, a, app.UIActions{Inventory: func(c context.Context) (app.Inventory, error) {
+		return app.RunUI(ctx, a, app.UIActions{PreviewLegacyUpdater: a.PreviewLegacyUpdaterCleanup, CleanupLegacyUpdater: a.CleanupLegacyUpdater, UpdateWhenIdle: a.UpdateWhenIdle, Inventory: func(c context.Context) (app.Inventory, error) {
 			if err := a.Reload(); err != nil {
 				if !errors.Is(err, os.ErrNotExist) {
 					return app.Inventory{}, err
@@ -85,10 +86,24 @@ func run(ctx context.Context, args []string) error {
 				a.P.Data = filepath.Join(a.P.Installer, "installer-data")
 			}
 			return a.Discover(c)
-		}, Status: a.Status, Install: a.Install, Migrate: a.Migrate, Diagnose: a.Diagnose, Repair: a.Reconcile, Recover: a.Recover, Service: a.Service, Update: a.Update, Rollback: a.Rollback, Uninstall: a.Uninstall, Component: a.ManagedComponent, Backups: a.Backups, BackupAction: a.BackupAction, DataAction: a.DataAction, Logs: a.Logs})
+		}, Status: a.Status, Install: a.Install, Migrate: a.Migrate, PreviewMigration: a.PreviewMigration, Diagnose: a.Diagnose, Repair: a.Reconcile, Recover: a.Recover, Service: a.Service, Update: a.Update, Rollback: a.Rollback, Uninstall: a.Uninstall, Component: a.ManagedComponent, Backups: a.Backups, BackupAction: a.BackupAction, DataAction: a.DataAction, Logs: a.Logs})
 	}
 	command := args[0]
 	args = args[1:]
+	for _, arg := range args {
+		if arg == "--no-auto-restart" && command != "install" && command != "migrate" {
+			return errors.New("--no-auto-restart 仅用于 install 或 migrate")
+		}
+		if arg == "--wait-idle" && command != "update" {
+			return errors.New("--wait-idle 仅用于 update")
+		}
+	}
+	if command == "autostart" {
+		if len(args) != 0 {
+			return errors.New("autostart 不接受参数")
+		}
+		return a.AutoStart(ctx)
+	}
 	if command == "serve" {
 		return a.Serve(ctx)
 	}
@@ -110,6 +125,7 @@ func run(ctx context.Context, args []string) error {
 		return a.Proxy(ctx, binding, args)
 	}
 	yes, force, dry, jsonOut := false, false, false, false
+	var waitIdle time.Duration
 	opt := app.InstallOptions{Backend: "auto"}
 	cop := app.ComponentOptions{ShellIntegration: true}
 	network := app.DefaultNetworkOptions()
@@ -127,6 +143,10 @@ func run(ctx context.Context, args []string) error {
 			jsonOut = true
 		case "--linger":
 			opt.Linger = true
+		case "--migrate-codexapp":
+			opt.MigrateCodexApp = true
+		case "--no-auto-restart":
+			opt.NoAutoRestart = true
 		case "--no-shell":
 			cop.ShellIntegration = false
 		case "--with-node":
@@ -137,6 +157,15 @@ func run(ctx context.Context, args []string) error {
 			network.UseMirrors = true
 		case "--no-proxy":
 			network.ProxyMode = "none"
+		case "--wait-idle":
+			if j+1 >= len(args) {
+				return errors.New("--wait-idle 需要时限，例如 30m 或 24h")
+			}
+			j++
+			waitIdle, e = time.ParseDuration(args[j])
+			if e != nil || waitIdle <= 0 {
+				return errors.New("--wait-idle 需要正数时限，例如 30m 或 24h")
+			}
 		case "--backend", "--codex", "--version", "--extension-root", "--entrypoint-dir", "--path", "--password-file", "--port", "--media-dir", "--shell", "--component", "--npm-registry", "--node-mirror", "--conda-mirror", "--proxy":
 			if j+1 >= len(args) {
 				return fmt.Errorf("%s缺少参数", arg)
@@ -186,6 +215,12 @@ func run(ctx context.Context, args []string) error {
 	opt.Yes = yes
 	opt.Force = force
 	opt.DryRun = dry
+	if waitIdle > 0 && force {
+		return errors.New("--wait-idle 不能与 --force 同时使用")
+	}
+	if opt.MigrateCodexApp && command != "migrate" {
+		return errors.New("--migrate-codexapp 仅用于 migrate；新装 CodexApp 使用 --component codexapp")
+	}
 	cop.Yes = yes
 	cop.DryRun = dry
 	if err := network.Validate(); err != nil {
@@ -218,8 +253,16 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	case "install", "migrate":
 		if !yes && !dry {
-			if _, _, e = a.PlanInstall(ctx, opt); e != nil {
-				return e
+			if command == "migrate" {
+				preview, err := a.PreviewMigration(ctx, opt)
+				fmt.Print(preview)
+				if err != nil {
+					return err
+				}
+			} else {
+				if _, _, e = a.PlanInstall(ctx, opt); e != nil {
+					return e
+				}
 			}
 			if !confirm(false, "确认上述部署计划？") {
 				return nil
@@ -240,17 +283,41 @@ func run(ctx context.Context, args []string) error {
 			return nil
 		}
 		return a.Recover(ctx)
+	case "cleanup-legacy-updater":
+		preview, err := a.PreviewLegacyUpdaterCleanup(ctx)
+		fmt.Print(preview)
+		if err != nil || dry {
+			return err
+		}
+		if !confirm(yes, "清理已核实的旧版更新进程及其 PID/socket；保留程序和用户数据？") {
+			return nil
+		}
+		return a.CleanupLegacyUpdater(ctx, true)
+	case "record-socket-owner":
+		if dry {
+			return errors.New("record-socket-owner 不支持 --dry-run；不会写入登记")
+		}
+		if !confirm(yes, "验证并登记当前受管后台的 socket 归属，不重启服务？") {
+			return nil
+		}
+		return a.RecordRuntimeSocketOwnership()
 	case "start", "stop", "restart":
 		if command != "start" && !confirm(yes, "此操作可能中断当前任务。") {
 			return nil
 		}
 		return a.Service(ctx, command, force)
 	case "update":
+		if dry {
+			return errors.New("update 不支持 --dry-run；不会执行更新")
+		}
 		if opt.CodexVersion != "" {
 			fmt.Println(network.Summary())
 		}
 		if !confirm(yes, "更新受管程序；空闲时切换，--force允许中断任务。") {
 			return nil
+		}
+		if waitIdle > 0 {
+			return a.UpdateWhenIdle(ctx, opt.CodexVersion, waitIdle)
 		}
 		return a.Update(ctx, opt.CodexVersion, force)
 	case "rollback":
@@ -340,9 +407,16 @@ const help = `Codex 后台管理 4.0
 
 inspect [--json] | status | doctor | logs
 install | migrate --extension-root DIR [--codex PATH|managed] [--backend auto|systemd|container]
-  [--entrypoint-dir DIR] [--component NAME] [--linger] [--dry-run] [--yes]
+  [--entrypoint-dir DIR] [--component NAME] [--linger] [--no-auto-restart] [--dry-run] [--yes]
+  崩溃后默认最多自动重启 5 次；--no-auto-restart 关闭部署的自动恢复
+  migrate --migrate-codexapp: 显式交接已识别的旧 CodexApp，保留程序、端口和密码
+  migrate --dry-run: 检查恢复材料、其他 IDE/服务依赖与活跃任务，不修改部署
 repair | recover | start | stop | restart [--yes] [--force]
-update [--version VERSION] | rollback TRANSACTION_ID [--yes] [--force]
+update [--version VERSION] [--wait-idle 30m] [--yes] [--force]
+  --wait-idle: 在当前进程等待连续空闲，超时退出；不能与 --force 同用
+rollback TRANSACTION_ID [--yes] [--force]
+cleanup-legacy-updater [--dry-run] [--yes] # 清理已迁移部署的旧 updater
+record-socket-owner [--yes] # 不重启，仅校验并登记当前 socket 归属
 uninstall [--yes] [--force]
 component install|configure|repair|uninstall|status|plan NAME [--path PATH] [--version VERSION]
   [--no-shell] [--password-file FILE] [--port PORT] [--configure] [--dry-run] [--yes]

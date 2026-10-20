@@ -395,6 +395,37 @@ try:
         "binding records observed connection",
         (RUNTIME / "connections" / f"{binding}.json").is_file(),
     )
+    control_file = RUNTIME / "run/control.json"
+    before_crash = json.loads(control_file.read_text())
+    crashed_pid = before_crash["child"]["pid"]
+    check("crash target belongs to isolated test", crashed_pid in own_processes())
+    os.kill(crashed_pid, signal.SIGKILL)
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        recovered = json.loads(control_file.read_text())
+        if (recovered["status"] == "running"
+                and recovered.get("child", {}).get("pid") != crashed_pid):
+            break
+        time.sleep(0.1)
+    check(
+        "real Codex crash recovers with one persisted retry",
+        recovered["status"] == "running" and recovered["retries"] == 1
+        and recovered.get("last_exit", {}).get("signal") == "SIGKILL",
+    )
+    third = connect(first_entry, "after-crash")
+    saved = request(third, "thread/read", {"threadId": thread_id, "includeTurns": True}, request_id=5)
+    check("completed thread remains readable after crash recovery",
+          "LOCAL_BACKGROUND_COMPLETED" in json.dumps(saved))
+    third.stdin.close()
+    third.wait(timeout=5)
+    check("crash recovery does not replay model request", len(RESULT["provider_requests"]) == 1)
+    command("stop", "--yes")
+    command("autostart")
+    check("container autostart preserves explicit stop",
+          json.loads(control_file.read_text())["desired"] == "stopped"
+          and not (RUNTIME / "run/app-server.sock").exists())
+    command("start", "--yes")
+    check("explicit start resets retry allowance", json.loads(control_file.read_text())["retries"] == 0)
     new_entry, new_original = create_extension("1.1.0-linux-x64")
     deadline = time.monotonic() + 6
     while time.monotonic() < deadline:

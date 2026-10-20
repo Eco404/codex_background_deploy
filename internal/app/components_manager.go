@@ -304,7 +304,14 @@ func (a *App) reuseComponent(ctx context.Context, name string, opt ComponentOpti
 			p = filepath.Join(p, "bin", "conda")
 		}
 	}
-	b, err := a.componentRun(ctx, nil, p, "--version")
+	var b []byte
+	var codexapp codexAppProbe
+	if name == "codexapp" {
+		codexapp, err = a.probeCodexAppDetails(ctx, p)
+		b = []byte(codexapp.Version)
+	} else {
+		b, err = a.componentRun(ctx, nil, p, "--version")
+	}
 	if err != nil {
 		return err
 	}
@@ -320,6 +327,9 @@ func (a *App) reuseComponent(ctx context.Context, name string, opt ComponentOpti
 	c := &Component{Name: name, Path: p, Version: strings.TrimSpace(string(b)), Ownership: "reused", Status: "installed", Options: map[string]string{}}
 	if name == "codexapp" {
 		c.Status = "available"
+		if codexapp.Node != "" {
+			c.Options["node"] = codexapp.Node
+		}
 	}
 	a.S.Components[name] = c
 	if err = a.Save(); err != nil {

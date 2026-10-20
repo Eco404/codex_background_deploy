@@ -287,7 +287,7 @@ func TestEngineServiceFailureRollsBackPreparedFiles(t *testing.T) {
 	}
 }
 
-func TestEnginePartialMigrationRestoresLegacyWhileHoldingLock(t *testing.T) {
+func TestEngineMigrationUnknownServiceRejectedBeforeStoppingKnownService(t *testing.T) {
 	a := engineApp(t)
 	ex := engineExtension(t, a)
 	cli := filepath.Join(a.P.Home, "codex")
@@ -298,8 +298,7 @@ func TestEnginePartialMigrationRestoresLegacyWhileHoldingLock(t *testing.T) {
 	unknown := filepath.Join(a.P.Home, ".config/systemd/user/codex-extension-hook.service")
 	engineFile(t, timer, "# vscode-codex-background-deploy extension-hook timer v2\noriginal timer")
 	engineFile(t, unknown, "unrelated external service")
-	unlockedDuringRecovery := false
-	restoredService := false
+	mutations := []string{}
 	a.RunCommand = func(_ context.Context, name string, args, env []string) ([]byte, error) {
 		if name == cli {
 			if len(args) == 1 {
@@ -316,15 +315,8 @@ func TestEnginePartialMigrationRestoresLegacyWhileHoldingLock(t *testing.T) {
 				return []byte("active\n"), nil
 			case "is-enabled":
 				return []byte("enabled\n"), nil
-			case "enable":
-				if len(args) > 2 && args[2] == "codex-extension-hook.timer" {
-					restoredService = true
-					unlock, e := a.Lock()
-					if e == nil {
-						unlockedDuringRecovery = true
-						unlock()
-					}
-				}
+			case "enable", "disable", "start", "stop", "daemon-reload":
+				mutations = append(mutations, strings.Join(args, " "))
 			}
 		}
 		return nil, nil
@@ -333,11 +325,8 @@ func TestEnginePartialMigrationRestoresLegacyWhileHoldingLock(t *testing.T) {
 	if e == nil || !strings.Contains(e.Error(), "来源未知") {
 		t.Fatalf("unknown source not rejected: %v", e)
 	}
-	if unlockedDuringRecovery {
-		t.Fatal("migration recovery ran after releasing mutation lock")
-	}
-	if !restoredService {
-		t.Fatal("previously enabled timer not restored")
+	if len(mutations) != 0 {
+		t.Fatalf("unknown service found after mutating known services: %v", mutations)
 	}
 	if engineRead(t, timer) != "# vscode-codex-background-deploy extension-hook timer v2\noriginal timer" {
 		t.Fatal("legacy timer content lost")
@@ -346,7 +335,12 @@ func TestEnginePartialMigrationRestoresLegacyWhileHoldingLock(t *testing.T) {
 		t.Fatal("unknown service changed")
 	}
 	if hasPending(a.P.Data) {
-		t.Fatal("successful migration rollback still pending")
+		t.Fatal("preflight created a pending transaction")
+	}
+	for _, p := range []string{a.P.Runtime, a.P.Data} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("failed preflight created %s: %v", p, err)
+		}
 	}
 }
 

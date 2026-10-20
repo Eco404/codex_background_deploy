@@ -120,14 +120,12 @@ func (a *App) configureCodexApp(ctx context.Context, c *Component, opt Component
 	}
 	node := a.componentBinary("node")
 	if node == "" {
-		inv, e := a.Discover(ctx)
-		if e != nil {
-			return e
-		}
-		for _, candidate := range inv.Candidates["node"] {
-			if candidate.Compatible {
-				node = candidate.Path
-				break
+		node = c.Options["node"]
+		if node == "" {
+			var e error
+			node, e = a.codexAppProbeNode(ctx, codexappExecutable(c))
+			if e != nil {
+				return e
 			}
 		}
 	}

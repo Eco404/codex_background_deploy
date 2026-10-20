@@ -2,72 +2,16 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 func (a *App) Migrate(ctx context.Context, opt InstallOptions) (err error) {
-	inv, opt, e := a.PlanInstall(ctx, opt)
+	plan, e := a.planMigration(ctx, opt)
 	if e != nil {
 		return e
-	}
-	if a.S.Installed {
-		return errors.New("新版已安装；使用repair/update")
-	}
-	if len(inv.Legacy) == 0 {
-		return errors.New("未发现旧部署；使用install")
-	}
-	for _, s := range inv.Legacy {
-		fmt.Fprintln(a.Out, "迁移检查:", s)
-	}
-	// Validate backups and configuration targets before pausing any service.
-	type legacyEntryRecord struct {
-		ex     Extension
-		backup string
-	}
-	var entries []legacyEntryRecord
-	for _, r := range opt.Roots {
-		exts, e := scanRoot(r)
-		if e != nil {
-			return e
-		}
-		for _, ex := range exts {
-			if !ex.Legacy {
-				continue
-			}
-			backup := ex.Entry + ".real"
-			head := readPrefix(backup, 2048)
-			if !executable(backup) || legacyEntry(head) || strings.Contains(head, Marker) {
-				return fmt.Errorf("原入口备份缺失或无效: %s；先重装扩展", backup)
-			}
-			entries = append(entries, legacyEntryRecord{ex, backup})
-		}
-	}
-	settings := []LegacySetting{}
-	for _, p := range []string{filepath.Join(a.P.Home, ".vscode-server/data/Machine/settings.json"), filepath.Join(a.P.Home, ".vscode-server-insiders/data/Machine/settings.json"), filepath.Join(a.P.Home, ".local/share/code-server/User/settings.json")} {
-		raw, e := os.ReadFile(p)
-		if errors.Is(e, os.ErrNotExist) {
-			continue
-		}
-		if e != nil {
-			return e
-		}
-		v, present, e := configValue(raw, "chatgpt.cliExecutable")
-		if e != nil {
-			return e
-		}
-		if present && v != "" {
-			known := v == filepath.Join(a.P.Home, "apps/codex-daemon-bridge/codex") || v == filepath.Join(a.P.Home, ".local/share/codex-daemon-bridge/codex") || v == filepath.Join(a.P.Home, ".local/share/codex-background/codex")
-			if !known {
-				return fmt.Errorf("未知CLI覆盖 %s，保留并要求手动确认来源", p)
-			}
-			settings = append(settings, LegacySetting{p, v})
-			fmt.Fprintln(a.Out, "移除已确认旧CLI覆盖:", p)
-		}
 	}
 	if opt.DryRun {
 		return nil
@@ -75,66 +19,110 @@ func (a *App) Migrate(ctx context.Context, opt InstallOptions) (err error) {
 	if !opt.Yes {
 		return errors.New("未确认迁移")
 	}
-	oldSocket := filepath.Join(a.S.CodexHome, "app-server-control/app-server-control.sock")
-	if _, e = os.Stat(oldSocket); e == nil && !opt.Force {
-		probe := *a
-		probe.P.Socket = oldSocket
-		if busy, e := probe.Busy(ctx); e != nil || busy {
-			return errors.New("旧后台忙碌或不能确认空闲；稍后迁移，或明确--force中断")
-		}
-	}
 	unlock, e := a.Lock()
 	if e != nil {
 		return e
 	}
-	t, e := a.begin("migrate")
+	locked := true
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
+	// Revalidate under the same lock that covers backups, old-service shutdown,
+	// new startup and dependency handoff. A concurrent recover cannot interleave.
+	plan, e = a.planMigration(ctx, opt)
 	if e != nil {
-		unlock()
 		return e
 	}
-	failed := true
+	opt = plan.Options
+	t, e := a.begin("migrate")
+	if e != nil {
+		return e
+	}
+	committed := false
 	defer func() {
-		if failed {
-			if unlock == nil {
-				var le error
-				unlock, le = a.Lock()
-				if le != nil {
-					err = fmt.Errorf("%v；未获得恢复锁: %w", err, le)
-					return
-				}
-			}
+		if !committed {
 			if re := a.recoverLocked(context.Background()); re != nil {
 				err = fmt.Errorf("%v；旧部署恢复未完成: %w", err, re)
 			}
 		}
-		if unlock != nil {
-			unlock()
-		}
 	}()
-	// Systemd resources are touched only with the old installer markers.
-	for _, name := range []string{"codex-extension-hook.timer", "codex-extension-hook.service", "codex-app-server.service", "codex-background.service"} {
-		p := filepath.Join(a.P.Home, ".config/systemd/user", name)
-		raw, e := os.ReadFile(p)
-		if errors.Is(e, os.ErrNotExist) {
-			continue
-		}
-		if e != nil {
+	// Prepare a new managed CLI before stopping the old service. Reused CLIs
+	// were already validated by the read-only preflight.
+	if opt.CodexPath == "managed" {
+		if _, e = a.InstallManagedCodex(ctx, opt.CodexVersion); e != nil {
 			return e
 		}
-		known := strings.Contains(string(raw), "vscode-codex-background-deploy") || strings.Contains(string(raw), "Description=Codex app-server background runtime") || strings.Contains(string(raw), "Description=Codex background runtime (managed)")
-		if !known {
-			return fmt.Errorf("旧服务来源未知，保留 %s", p)
+	}
+	// Save all known originals before the first service is stopped.
+	for _, file := range append(append([]migrationFile{}, plan.Units...), plan.Hooks...) {
+		if e = file.unchanged(); e != nil {
+			return e
 		}
-		active, _ := a.Run(ctx, "systemctl", "--user", "is-active", name)
-		enabled, _ := a.Run(ctx, "systemctl", "--user", "is-enabled", name)
-		t.LegacyUnits = append(t.LegacyUnits, LegacyUnit{name, strings.TrimSpace(string(active)) == "active", strings.TrimSpace(string(enabled)) == "enabled"})
+		b, backupErr := a.BackupFile(file.Path, "legacy-resource", t.ID)
+		if backupErr != nil {
+			return backupErr
+		}
+		if b.Hash != file.Hash {
+			return errors.New("迁移备份期间来源文件变化")
+		}
+	}
+	for _, entry := range plan.Entries {
+		b, backupErr := a.BackupFile(entry.ex.Entry, "legacy-wrapper", t.ID)
+		if backupErr != nil {
+			return backupErr
+		}
+		if b.Hash != entry.entryHash {
+			return errors.New("旧扩展入口在预检查后变化，未迁移")
+		}
+		original, backupErr := a.BackupFile(entry.backup, "legacy-original", t.ID)
+		if backupErr != nil {
+			return backupErr
+		}
+		if original.Hash != entry.originalHash {
+			return errors.New("旧扩展原件在预检查后变化，未迁移")
+		}
+		if e = (migrationFile{entry.ex.Entry, entry.entryHash}).unchanged(); e != nil {
+			return e
+		}
+		if e = (migrationFile{entry.backup, entry.originalHash}).unchanged(); e != nil {
+			return e
+		}
+	}
+	if e = a.prepareLegacyCodexApp(t, plan.CodexApp); e != nil {
+		return e
+	}
+	if e = a.prepareLegacyUpdater(t, plan.Updater); e != nil {
+		return e
+	}
+	if e = a.checkMigrationPlanIdle(ctx, plan, opt.Force); e != nil {
+		return e
+	}
+	if e = a.stopLegacyCodexApp(ctx, t); e != nil {
+		return e
+	}
+	// Systemd resources are touched only with the old installer markers.
+	for _, file := range plan.Units {
+		p, name := file.Path, filepath.Base(file.Path)
+		if e = file.unchanged(); e != nil {
+			return e
+		}
+		if e = a.checkLegacyUnitIdle(ctx, file, plan.UnitSockets[file.Path], opt.Force); e != nil {
+			return e
+		}
+		unit, stateErr := a.inspectLegacyUnitState(ctx, name)
+		if stateErr != nil {
+			return stateErr
+		}
+		t.LegacyUnits = append(t.LegacyUnits, unit)
 		if e = a.saveTx(t); e != nil {
 			return e
 		}
 		if _, e = a.Run(ctx, "systemctl", "--user", "disable", "--now", name); e != nil {
 			return e
 		}
-		b, e := a.BackupFile(p, "legacy-service", t.ID)
+		b, e := a.BackupFile(p, "legacy-resource", t.ID)
 		if e != nil {
 			return e
 		}
@@ -151,34 +139,24 @@ func (a *App) Migrate(ctx context.Context, opt InstallOptions) (err error) {
 			return e
 		}
 	}
-	oldControl := filepath.Join(a.P.Home, ".local/share/codex-background/payload/control.sh")
-	if _, e = os.Stat(filepath.Join(a.P.Home, ".local/share/codex-background/managed-v3")); e == nil {
-		source := filepath.Join(a.P.Installer, "legacy/v3/payload/control.sh")
-		h1, e1 := Hash(source)
-		h2, e2 := Hash(oldControl)
-		if e1 != nil || e2 != nil || h1 != h2 {
-			return errors.New("v3控制器与保存来源不一致；需人工校验后迁移")
+	if plan.Control != "" {
+		if e = a.checkMigrationIdle(ctx, plan.ControlSocket, opt.Force); e != nil {
+			return e
 		}
-		t.LegacyControl = oldControl
+		t.LegacyControl = plan.Control
 		if e = a.saveTx(t); e != nil {
 			return e
 		}
-		if _, e = a.Run(ctx, "/bin/bash", oldControl, "stop"); e != nil {
+		if _, e = a.Run(ctx, "/bin/bash", plan.Control, "stop"); e != nil {
 			return e
 		}
 	}
-	for _, p := range []string{filepath.Join(a.P.Home, "entrypoint.d/05-start-codex-daemon.sh"), filepath.Join(a.P.Home, "entrypoint.d/20-codex-background.sh")} {
-		raw, e := os.ReadFile(p)
-		if errors.Is(e, os.ErrNotExist) {
-			continue
-		}
-		if e != nil {
+	for _, file := range plan.Hooks {
+		p := file.Path
+		if e = file.unchanged(); e != nil {
 			return e
 		}
-		if !strings.Contains(string(raw), "codex") {
-			return errors.New("未知容器启动脚本")
-		}
-		b, e := a.BackupFile(p, "legacy-entrypoint", t.ID)
+		b, e := a.BackupFile(p, "legacy-resource", t.ID)
 		if e != nil {
 			return e
 		}
@@ -190,11 +168,12 @@ func (a *App) Migrate(ctx context.Context, opt InstallOptions) (err error) {
 			return e
 		}
 	}
-	if _, e = os.Stat(oldSocket); e == nil {
-		cli := opt.CodexPath
-		if cli == "managed" {
-			cli = filepath.Join(a.P.Home, ".codex/packages/standalone/current/codex")
+	if plan.Daemon != "" {
+		// Recheck immediately before shutdown; forced migration is explicit.
+		if e = a.checkMigrationIdle(ctx, plan.Socket, opt.Force); e != nil {
+			return e
 		}
+		cli := plan.Daemon
 		t.LegacyDaemon = cli
 		if e = a.saveTx(t); e != nil {
 			return e
@@ -202,8 +181,28 @@ func (a *App) Migrate(ctx context.Context, opt InstallOptions) (err error) {
 		if _, e = a.Run(ctx, cli, "app-server", "daemon", "stop"); e != nil {
 			return e
 		}
+		// Stop the native updater only after the old model server stopped. If
+		// anything fails, native daemon start must perform a fresh startup and
+		// restore both processes, rather than returning early for a live server.
+		if e = a.stopLegacyUpdater(ctx, t); e != nil {
+			return e
+		}
+		if plan.Updater != nil {
+			// The updater could finish an update between the first daemon stop
+			// and its own SIGTERM. Recheck through the same native controller
+			// after it is gone so no old model server survives the handoff.
+			if _, e = a.Run(ctx, cli, "app-server", "daemon", "stop"); e != nil {
+				return e
+			}
+		}
 	}
-	for _, entry := range entries {
+	for _, entry := range plan.Entries {
+		if e = (migrationFile{entry.ex.Entry, entry.entryHash}).unchanged(); e != nil {
+			return e
+		}
+		if e = (migrationFile{entry.backup, entry.originalHash}).unchanged(); e != nil {
+			return e
+		}
 		b, e := a.BackupFile(entry.ex.Entry, "legacy-wrapper", t.ID)
 		if e != nil {
 			return e
@@ -230,14 +229,14 @@ func (a *App) Migrate(ctx context.Context, opt InstallOptions) (err error) {
 			return e
 		}
 	}
-	for _, s := range settings {
-		t.LegacySettings = append(t.LegacySettings, s)
-		if e = a.saveTx(t); e != nil {
-			return e
-		}
+	for _, s := range plan.Settings {
 		raw, e := os.ReadFile(s.Path)
 		if e != nil {
 			return e
+		}
+		value, present, checkErr := configValue(raw, "chatgpt.cliExecutable")
+		if checkErr != nil || !present || value != s.Value {
+			return fmt.Errorf("IDE 配置在预检查后变化，保留 %s", s.Path)
 		}
 		out, e := editConfigKey(raw, "chatgpt.cliExecutable", nil)
 		if e != nil {
@@ -247,19 +246,26 @@ func (a *App) Migrate(ctx context.Context, opt InstallOptions) (err error) {
 		if e != nil {
 			return e
 		}
+		t.LegacySettings = append(t.LegacySettings, s)
+		if e = a.saveTx(t); e != nil {
+			return e
+		}
 		if e = a.ReplaceBytes(s.Path, out, info.Mode().Perm()); e != nil {
 			return e
 		}
 	}
-	unlock()
-	unlock = nil
-	if e = a.installCore(ctx, opt); e != nil {
+	if e = a.installCoreLocked(ctx, opt, t); e != nil {
 		return e
 	}
-	failed = false
-	// Original legacy directories remain external archives; report paths for explicit cleanup.
-	fmt.Fprintln(a.Out, "迁移完成；旧程序目录保留为复用/迁移来源，未删除外部Node、Conda或用户数据。")
+	if e = a.configureMigratedCodexApp(ctx, t, plan.CodexApp); e != nil {
+		return e
+	}
+	if e = a.commit(t); e != nil {
+		return e
+	}
+	committed = true
+	unlock()
+	locked = false
+	fmt.Fprintln(a.Out, "迁移完成；核心及已选择的旧 CodexApp 已验证，外部程序和用户数据保留。请 Reload Window。")
 	return a.installExtras(ctx, opt)
 }
-
-var _ = json.Valid

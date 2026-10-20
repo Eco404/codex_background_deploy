@@ -75,16 +75,21 @@ func TestUIUnavailableCoreActionsCannotBeSelected(t *testing.T) {
 }
 
 func TestUIServiceActionsFollowDetectedState(t *testing.T) {
-	for _, state := range []string{"running", "stopped", "unknown"} {
+	for _, state := range []string{"running", "starting", "retrying", "stopped", "stopping", "stop_failed", "exhausted", "failed", "maintenance", "unknown"} {
 		t.Run(state, func(t *testing.T) {
 			m := &uiModel{app: &App{}, inventory: Inventory{ServiceState: state}}
 			m.app.S.Installed = true
 			m.serviceMenu()
-			if (uiFind(t, m, "启动").disabled != "") != (state == "running") {
+			startBlocked := state == "running" || state == "starting" || state == "retrying" || state == "maintenance" || state == "stopping" || state == "stop_failed"
+			if (uiFind(t, m, "启动").disabled != "") != startBlocked {
 				t.Fatal("start availability incorrect")
 			}
 			for _, label := range []string{"停止", "重启"} {
-				if (uiFind(t, m, label).disabled != "") != (state == "stopped") {
+				stopBlocked := state == "stopped" || state == "exhausted" || state == "failed" || state == "maintenance"
+				if label == "重启" && (state == "stopping" || state == "stop_failed") {
+					stopBlocked = true
+				}
+				if (uiFind(t, m, label).disabled != "") != stopBlocked {
 					t.Fatal("stop availability incorrect")
 				}
 			}

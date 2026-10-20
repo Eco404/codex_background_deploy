@@ -101,6 +101,8 @@ func (a *App) Discover(ctx context.Context) (Inventory, error) {
 				inv.ServiceState = "running"
 			}
 		}
+		inv.ServiceState = a.RuntimeServiceState(inv.ServiceState)
+		inv.RuntimeStatus = a.readRuntimeStatus()
 	}
 	aptFound, dpkgFound := false, false
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
@@ -165,7 +167,7 @@ func (a *App) Discover(ctx context.Context) (Inventory, error) {
 		if base == "" {
 			continue
 		}
-		for _, name := range []string{"node", "codex"} {
+		for _, name := range []string{"node", "codex", "codexapp"} {
 			matches, _ := filepath.Glob(filepath.Join(base, "versions/node/*/bin", name))
 			sort.Sort(sort.Reverse(sort.StringSlice(matches)))
 			for _, p := range matches {
@@ -184,6 +186,9 @@ func (a *App) Discover(ctx context.Context) (Inventory, error) {
 		for _, name := range []string{"codexapp", "CodexApp", "bin/codexapp", "node_modules/.bin/codexapp"} {
 			add("codexapp", filepath.Join(base, name), "existing CodexApp")
 		}
+	}
+	if c := a.S.Components["codexapp"]; c != nil {
+		add("codexapp", codexappExecutable(c), "registered CodexApp")
 	}
 	for _, root := range discoveryRoots(home, a.S.SelectedRoots) {
 		dirs, _ := filepath.Glob(filepath.Join(root, "openai.chatgpt-*"))
@@ -233,11 +238,20 @@ func (a *App) Discover(ctx context.Context) (Inventory, error) {
 			inv.Candidates[loc.kind] = append(inv.Candidates[loc.kind], candidate)
 			continue
 		}
-		output, err := a.probe(ctx, resolved, "--version")
-		candidate.Version = discoveryVersion.FindString(string(output))
-		candidate.Compatible = err == nil && candidate.Version != ""
-		if !candidate.Compatible {
-			candidate.Reason = "version check failed or unsupported output"
+		if loc.kind == "codexapp" {
+			var err error
+			candidate.Version, err = a.probeCodexApp(ctx, resolved)
+			candidate.Compatible = err == nil
+			if err != nil {
+				candidate.Reason = err.Error()
+			}
+		} else {
+			output, err := a.probe(ctx, resolved, "--version")
+			candidate.Version = discoveryVersion.FindString(string(output))
+			candidate.Compatible = err == nil && candidate.Version != ""
+			if !candidate.Compatible {
+				candidate.Reason = "version check failed or unsupported output"
+			}
 		}
 		if candidate.Compatible && loc.kind == "node" {
 			var major int
@@ -273,6 +287,18 @@ func (a *App) Discover(ctx context.Context) (Inventory, error) {
 	for _, p := range []string{filepath.Join(home, ".config/systemd/user/codex-app-server.service"), filepath.Join(home, ".config/systemd/user/codex-extension-hook.timer"), filepath.Join(home, "entrypoint.d/05-start-codex-daemon.sh"), filepath.Join(home, "apps/codex-daemon-bridge"), filepath.Join(home, ".local/share/codex-daemon-bridge"), filepath.Join(home, ".local/share/codex-background"), filepath.Join(home, ".codex/app-server-control/app-server-control.sock")} {
 		if _, e := os.Lstat(p); e == nil {
 			inv.Legacy = append(inv.Legacy, p)
+		}
+	}
+	legacyAppHooks := map[string]bool{}
+	for _, dir := range []string{filepath.Join(home, "entrypoint.d"), inv.EntrypointDir} {
+		if dir == "" {
+			continue
+		}
+		file := filepath.Join(dir, "10-start-codexapp.sh")
+		content := readPrefix(file, 1<<20)
+		if !legacyAppHooks[file] && strings.Contains(content, "CODEXUI_CODEX_COMMAND") && (strings.Contains(content, "codex-daemon-bridge") || strings.Contains(content, "codex-background")) {
+			inv.Legacy = append(inv.Legacy, "CodexApp dependency: "+file)
+			legacyAppHooks[file] = true
 		}
 	}
 	for _, p := range []string{filepath.Join(home, ".vscode-server/data/Machine/settings.json"), filepath.Join(home, ".vscode-server-insiders/data/Machine/settings.json"), filepath.Join(home, ".local/share/code-server/User/settings.json"), filepath.Join(home, ".config/Code/User/settings.json"), filepath.Join(home, ".config/Code - OSS/User/settings.json"), filepath.Join(home, ".config/Code - Insiders/User/settings.json"), filepath.Join(home, ".config/VSCodium/User/settings.json")} {

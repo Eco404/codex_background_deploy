@@ -201,12 +201,7 @@ func (m *uiModel) deploymentMenu() {
 		items = append(items,
 			m.choice("更新核心", m.coreBlock(), func(m *uiModel) tea.Cmd {
 				if m.app.S.Codex.Source != "managed" {
-					return m.forceChoice("更新工具到当前安装包；继续复用现有 Codex", func(force bool) tea.Msg {
-						if m.actions.Update == nil {
-							return unavailable()
-						}
-						return uiResult{err: m.actions.Update(m.ctx, "", force), text: "工具更新完成，外部 Codex 保持原版本"}
-					})
+					return m.updateChoice("更新工具到当前安装包；继续复用现有 Codex", "")
 				}
 				return m.ask("受管 Codex 目标版本（留空仅更新工具到当前安装包）", func(m *uiModel, s string) tea.Cmd {
 					description := "更新工具到当前安装包"
@@ -214,12 +209,7 @@ func (m *uiModel) deploymentMenu() {
 						description += "，并更新受管 Codex 至 " + s
 					}
 					return m.withNetwork(func(m *uiModel) tea.Cmd {
-						return m.forceChoice(description+"\n"+m.app.Network.Summary(), func(force bool) tea.Msg {
-							if m.actions.Update == nil {
-								return unavailable()
-							}
-							return uiResult{err: m.actions.Update(m.ctx, s, force), text: "更新操作完成"}
-						})
+						return m.updateChoice(description+"\n"+m.app.Network.Summary(), s)
 					})
 				})
 			}),
@@ -250,7 +240,15 @@ func (m *uiModel) deploymentMenu() {
 	m.refreshTo = m.resultTo
 }
 func (m *uiModel) migrationSummary() string {
-	return "迁移会先检查旧入口原件和恢复条件，再切换已确认的旧服务、入口及 CLI 配置覆盖。\n检测结果：\n  " + strings.Join(m.inventory.Legacy, "\n  ")
+	return "迁移会先检查恢复材料、关联依赖和后台是否空闲，再切换旧服务及所选 IDE 的入口与配置。依赖旧后台的 CodexApp 需单独勾选迁移。\n检测结果：\n  " + strings.Join(m.inventory.Legacy, "\n  ")
+}
+func (m *uiModel) hasLegacyCodexApp() bool {
+	for _, item := range m.inventory.Legacy {
+		if strings.HasPrefix(item, "CodexApp dependency: ") {
+			return true
+		}
+	}
+	return false
 }
 func (m *uiModel) maintenanceMenu() {
 	items := []uiItem{
@@ -269,6 +267,29 @@ func (m *uiModel) maintenanceMenu() {
 				return uiResult{err: m.actions.Repair(m.ctx), text: "入口修复完成"}
 			})
 		}),
+	}
+	if m.app.S.Installed {
+		pidFile := filepath.Join(m.app.S.CodexHome, "app-server-daemon", "app-server-updater.pid")
+		if _, err := os.Lstat(pidFile); err == nil {
+			items = append(items, m.choice("检查并清理旧 updater", m.coreBlock(), func(m *uiModel) tea.Cmd {
+				m.startBusy("正在核实旧更新进程的迁移来源与身份")
+				return func() tea.Msg {
+					if m.actions.PreviewLegacyUpdater == nil || m.actions.CleanupLegacyUpdater == nil {
+						return unavailable()
+					}
+					preview, err := m.actions.PreviewLegacyUpdater(m.ctx)
+					if err != nil {
+						return uiResult{err: fmt.Errorf("%w\n%s", err, preview)}
+					}
+					return uiResult{resume: func(m *uiModel) tea.Cmd {
+						m.maintenanceMenu()
+						return m.confirm(preview, false, func() tea.Msg {
+							return uiResult{err: m.actions.CleanupLegacyUpdater(m.ctx, true), text: "旧 updater 清理操作完成；当前 Codex 后台保持运行"}
+						})
+					}}
+				}
+			}))
+		}
 	}
 	if hasPending(m.app.P.Data) {
 		items = append(items, m.item("恢复未完成事务", func(m *uiModel) tea.Cmd {
@@ -316,6 +337,24 @@ func (m *uiModel) filesMenu() {
 	m.refreshTo = m.resultTo
 }
 func unavailable() tea.Msg { return uiResult{err: fmt.Errorf("此操作未配置")} }
+func (m *uiModel) updateChoice(description, version string) tea.Cmd {
+	m.forceChoice(description, func(force bool) tea.Msg {
+		if m.actions.Update == nil {
+			return unavailable()
+		}
+		return uiResult{err: m.actions.Update(m.ctx, version, force), text: "更新操作完成"}
+	})
+	wait := m.item("等待空闲后更新：最多等待 30 分钟", func(m *uiModel) tea.Cmd {
+		return m.confirm(description+"\n在此界面等待连续空闲 10 秒，再重新检查并更新；最多等待 30 分钟。取消或超时不会强制切换。", false, func() tea.Msg {
+			if m.actions.UpdateWhenIdle == nil {
+				return unavailable()
+			}
+			return uiResult{err: m.actions.UpdateWhenIdle(m.ctx, version, 30*time.Minute), text: "空闲更新完成"}
+		})
+	})
+	m.items = append(m.items[:1], append([]uiItem{wait}, m.items[1:]...)...)
+	return nil
+}
 func (m *uiModel) forceChoice(description string, fn func(bool) tea.Msg) tea.Cmd {
 	m.menu(description, m.returnHere(),
 		m.item("安全执行：仅后台空闲时继续（默认）", func(m *uiModel) tea.Cmd {
@@ -508,14 +547,41 @@ func (m *uiModel) installComponents() {
 	m.componentForInstall = false
 	m.pendingCodexApp = nil
 	names := m.componentNames()
-	items := []uiItem{}
+	mark := "[x] "
+	if m.options.NoAutoRestart {
+		mark = "[ ] "
+	}
+	items := []uiItem{m.item(mark+"崩溃后自动重启（最多 5 次）", func(m *uiModel) tea.Cmd {
+		m.options.NoAutoRestart = !m.options.NoAutoRestart
+		m.installComponents()
+		return nil
+	})}
+	if m.migrate && m.hasLegacyCodexApp() {
+		mark := "[ ] "
+		if m.options.MigrateCodexApp {
+			mark = "[x] "
+		}
+		reason := ""
+		if m.options.Backend != "container" {
+			reason = "该旧 CodexApp 使用容器启动方式，请返回选择容器后台"
+		}
+		items = append(items, m.choice(mark+"迁移现有 CodexApp（保留程序、端口和密码）", reason, func(m *uiModel) tea.Cmd {
+			m.options.MigrateCodexApp = !m.options.MigrateCodexApp
+			m.installComponents()
+			return nil
+		}))
+	}
 	for _, name := range names {
 		name := name
 		mark := "[ ] "
 		if hasString(m.options.Components, name) {
 			mark = "[x] "
 		}
-		items = append(items, m.choice(mark+componentLabel(name), m.componentInstallBlock(name, true), func(m *uiModel) tea.Cmd {
+		reason := m.componentInstallBlock(name, true)
+		if name == "codexapp" && m.migrate && m.hasLegacyCodexApp() {
+			reason = "现有 CodexApp 依赖旧后台，请使用上方的迁移选项"
+		}
+		items = append(items, m.choice(mark+componentLabel(name), reason, func(m *uiModel) tea.Cmd {
 			next := []string{}
 			found := false
 			for _, n := range m.options.Components {
@@ -552,9 +618,17 @@ func (m *uiModel) installComponents() {
 	items = append(items, m.item("预览并确认", func(m *uiModel) tea.Cmd {
 		return m.withNetwork(func(m *uiModel) tea.Cmd {
 			description := fmt.Sprintf("操作：%s\n方式：%s\nCodex：%s 版本：%s\n扩展目录：\n  %s\n可选组件：%v\nlinger：%v", m.deploymentKind(), m.options.Backend, m.options.CodexPath, m.options.CodexVersion, strings.Join(m.options.Roots, "\n  "), m.options.Components, m.options.Linger)
+			if m.options.NoAutoRestart {
+				description += "\n崩溃后自动重启：关闭；异常退出后需手动启动"
+			} else {
+				description += "\n崩溃后自动重启：开启，最多 5 次；连续协议健康 2 分钟后恢复额度。手动停止和维护期间不自动拉起。"
+			}
 			description += "\n" + m.app.Network.Summary()
 			if m.migrate {
 				description += "\n\n" + m.migrationSummary()
+				if m.options.MigrateCodexApp {
+					description += "\n同时迁移现有 CodexApp：短暂停止并切换后台连接，核心与 CodexApp 均验证成功后提交；失败一并恢复。"
+				}
 			}
 			for _, name := range m.options.Components {
 				opt := m.options.ComponentOptions[name]
@@ -568,7 +642,7 @@ func (m *uiModel) installComponents() {
 				}
 			}
 			opts := m.options
-			return m.confirm(description, false, func() tea.Msg {
+			execute := func() tea.Msg {
 				fn := m.actions.Install
 				if m.migrate {
 					fn = m.actions.Migrate
@@ -577,10 +651,24 @@ func (m *uiModel) installComponents() {
 					return unavailable()
 				}
 				return uiResult{err: fn(m.ctx, opts), text: m.deploymentKind() + "操作完成；请检查扩展连接"}
-			})
+			}
+			if m.migrate && m.actions.PreviewMigration != nil {
+				m.startBusy("正在检查旧部署、关联服务和活跃任务")
+				return func() tea.Msg {
+					preview, err := m.actions.PreviewMigration(m.ctx, opts)
+					if err != nil {
+						return uiResult{err: err, text: preview, resume: uiShow((*uiModel).installComponents)}
+					}
+					return uiResult{resume: func(m *uiModel) tea.Cmd {
+						m.installComponents()
+						return m.confirm(description+"\n\n预检查结果：\n"+preview, false, execute)
+					}}
+				}
+			}
+			return m.confirm(description, false, execute)
 		})
 	}))
-	m.menu(m.deploymentKind()+" · 可选组件（核心不依赖 Node）", uiShow((*uiModel).backendMenu), items...)
+	m.menu(m.deploymentKind()+" · 后台保护与可选组件（核心不依赖 Node）", uiShow((*uiModel).backendMenu), items...)
 }
 func componentLabel(name string) string {
 	if name == "marketplace" {
@@ -901,14 +989,32 @@ func (m *uiModel) serviceMenu() {
 				return uiResult{err: m.actions.Service(m.ctx, name, force), text: "后台操作完成"}
 			}
 			if name == "start" {
-				return m.confirm("启动后台服务", false, func() tea.Msg { return operation(false) })
+				description := "启动后台服务"
+				if m.inventory.ServiceState == "exhausted" || m.inventory.ServiceState == "failed" {
+					description += "；清除本次失败状态并恢复自动重启额度"
+				}
+				return m.confirm(description, false, func() tea.Msg { return operation(false) })
+			}
+			if name == "stop" && m.inventory.ServiceState == "retrying" {
+				return m.confirm("停止自动重试并保持后台停止；以后需明确选择启动。", false, func() tea.Msg { return operation(false) })
 			}
 			return m.forceChoice("后台服务："+label, operation)
 		}))
 	}
 	m.menu("后台服务", uiShow((*uiModel).maintenanceMenu), items...)
+	if m.app.S.Installed {
+		m.note = m.runtimeSummary()
+	}
 	m.resultTo = uiShow((*uiModel).serviceMenu)
 	m.refreshTo = m.resultTo
+}
+
+func (m *uiModel) runtimeSummary() string {
+	snapshot := m.inventory.RuntimeStatus
+	if snapshot == nil {
+		snapshot = m.app.readRuntimeStatus()
+	}
+	return snapshot.Summary(m.inventory.ServiceState)
 }
 func (m *uiModel) loadBackups() tea.Cmd {
 	m.startBusy("正在读取备份")
@@ -1081,6 +1187,9 @@ func (m *uiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.backupMenu()
 			return m, nil
 		}
+		if msg.err == nil && msg.resume != nil {
+			return m, msg.resume(m)
+		}
 		m.screen = "result"
 		m.backTo = (*uiModel).leaveResult
 		m.detail = msg.text
@@ -1224,6 +1333,9 @@ func (m *uiModel) View() string {
 				status = "检测到旧部署，尚无新版安装记录"
 			}
 			b.WriteString(status + "\n" + fmt.Sprintf("主机 %s · systemd=%v · container=%v\n", m.inventory.Host, m.inventory.Systemd, m.inventory.Container))
+			if m.app.S.Installed {
+				b.WriteString(uiPlain(m.runtimeSummary()) + "\n")
+			}
 			b.WriteByte('\n')
 		}
 		if m.note != "" {
