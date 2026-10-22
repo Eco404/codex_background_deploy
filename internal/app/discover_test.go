@@ -188,7 +188,7 @@ func TestUIOptionalComponentsStayDisabledAndCollectOptionsBeforeInstall(t *testi
 		t.Fatal("component options wizard not opened")
 	}
 	for _, item := range m.items {
-		if item.label == "安装受管版本" {
+		if item.label == "单独安装一份" {
 			item.action(m)
 			break
 		}
@@ -196,7 +196,7 @@ func TestUIOptionalComponentsStayDisabledAndCollectOptionsBeforeInstall(t *testi
 	m.onInput(m, "0.1.90")
 	m.onInput(m, "/private/password.txt")
 	m.onInput(m, "8214")
-	uiChooseTest(t, m, "将受管 Node 依赖加入计划")
+	uiChooseTest(t, m, "同时安装 Node")
 	opt, ok := m.options.ComponentOptions["codexapp"]
 	if !ok || opt.Version != "0.1.90" || opt.PasswordFile != "/private/password.txt" || opt.Port != "8214" {
 		t.Fatalf("lost component options: %+v", opt)
@@ -218,11 +218,11 @@ func TestUICodexAppNodeDependencyRequiresFinalConfirmation(t *testing.T) {
 	if !strings.Contains(m.title, "缺少 Node >=20") {
 		t.Fatal("missing prerequisite page")
 	}
-	cmd := uiChooseTest(t, m, "将受管 Node 依赖加入计划")
+	cmd := uiChooseTest(t, m, "同时安装 Node")
 	if cmd != nil || called {
 		t.Fatal("dependency selection executed mutation")
 	}
-	if m.screen != "confirm" || !strings.Contains(m.detail, "安装受管 Node 依赖：true") {
+	if m.screen != "confirm" || !strings.Contains(m.detail, "同时安装 Node：true") {
 		t.Fatal("preview omitted dependency")
 	}
 	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -363,7 +363,7 @@ func TestUIRepairUsesRepairCallbackAndManagedSelectionIsExplicit(t *testing.T) {
 	m.component = "node"
 	m.componentAction = "install"
 	m.componentCandidates()
-	uiChooseTest(t, m, "安装受管版本")
+	uiChooseTest(t, m, "单独安装一份")
 	m.onInput(m, "")
 	if m.componentOptions.Path != "managed" {
 		t.Fatal("managed install can fall back to implicit reuse")

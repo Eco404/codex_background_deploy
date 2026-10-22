@@ -125,7 +125,7 @@ func (a *App) checkManaged() error {
 			return e
 		}
 		if h != f.Hash {
-			return fmt.Errorf("受管文件外部修改，保留: %s", f.Path)
+			return fmt.Errorf("本工具管理的文件已被外部修改，保留现状: %s", f.Path)
 		}
 	}
 	return nil

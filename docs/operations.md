@@ -75,7 +75,7 @@ CLI 默认使用官方源并沿用代理环境；修改仍需确认或显式 `--
 
 监督器在“预期运行”时观察到 Codex 退出，最多自动重启 5 次，分别等待 2、4、8、16、30 秒。启动失败、启动后很快退出都累计失败；只有通过协议就绪检查、连续健康运行 2 分钟后才恢复额度。进程还活着但一次健康检查超时只报告异常，不直接强杀重启。额度耗尽后显示“重试额度已耗尽”，需要明确执行 `codex-bg start` 或在服务菜单选择“启动”，才会清除失败状态并重新尝试。
 
-运行意图、失败次数和恢复状态保存在受管运行目录，监督器或容器重启不会自动抹去手动停止、维护或额度耗尽状态。容器启动钩子使用内部 `autostart` 入口，遵守已保存状态；它与用户明确执行的 `start` 不同。systemd 的外层进程重启也使用同一份状态，不绕过重试限制。
+运行意图、失败次数和恢复状态保存在本工具的运行目录，监督器或容器重启不会自动抹去手动停止、维护或额度耗尽状态。容器启动钩子使用内部 `autostart` 入口，遵守已保存状态；它与用户明确执行的 `start` 不同。systemd 的外层进程重启也使用同一份状态，不绕过重试限制。
 
 `stop` 先登记手动停止，再停止进程；升级、回退、迁移、卸载先登记维护意图，由相应操作负责恢复或结束服务。关闭 VSCode、桥接连接断开不会触发 Codex 重启。直接使用 `kill` 无法可靠表达用户意图；在“预期运行”状态下，非预期退出会被视为故障。由本工具以外的程序升级或替换 Codex 前，应先通过 `codex-bg stop` 停止，完成后再 `codex-bg start`。
 
@@ -125,7 +125,7 @@ systemd 用户服务名为 `codex-bg.service`；选择 systemd 部署即注册�
 # 确认空闲并检查预览后，去掉 --dry-run 进入确认
 ```
 
-自动交接目前支持已核实的旧容器 `entrypoint.d/10-start-codexapp.sh` 实现；自定义或改动过的启动脚本、未知服务管理器、额外启动参数、身份不符的进程会阻止迁移。交接复用已有程序和固定 Node 路径，保留端口，将原密码复制到新受管运行目录，原密码文件与用户数据保留。旧启动脚本集中备份后停用，通过 PID、启动时间、UID、执行文件和参数核实旧进程，使用 Linux pidfd 停止，无法确认时不猜测发送信号。
+自动交接目前支持已核实的旧容器 `entrypoint.d/10-start-codexapp.sh` 实现；自定义或改动过的启动脚本、未知服务管理器、额外启动参数、身份不符的进程会阻止迁移。交接复用已有程序和固定 Node 路径，保留端口，将原密码复制到本工具的运行目录，原密码文件与用户数据保留。旧启动脚本集中备份后停用，通过 PID、启动时间、UID、执行文件和参数核实旧进程，使用 Linux pidfd 停止，无法确认时不猜测发送信号。
 
 旧 native daemon 的更新进程与模型服务相互独立，单独执行旧版 `daemon stop` 可能留下 updater。迁移现在将来源明确的 updater 一起交接：核对原启动项、PID/启动时间、内核启动标识、执行路径、HOME 和 socket，使用 pidfd 发送 SIGTERM；不按进程名称批量终止。停止后把 PID 记录及 updater 日志集中备份，清理原 socket；保留 Codex 程序、认证、会话和共享环境。迁移回滚会恢复并验证旧 updater。
 
@@ -142,7 +142,7 @@ systemd 用户服务名为 `codex-bg.service`；选择 systemd 部署即注册�
 
 ## 可选组件与外部环境
 
-Node、Miniconda、CodexApp 在普通Linux和容器都可选，默认关闭。容器额外提供满足能力条件的 apti、code-server 图标和微软官方插件源。已有兼容环境是默认推荐，亦可指定路径或安装受管版本。
+Node、Miniconda、CodexApp 在普通Linux和容器都可选，默认关闭。容器额外提供满足能力条件的 apti、code-server 图标和微软官方插件源。已有兼容环境是默认推荐，也可指定现有路径，或通过本工具单独安装一份。
 
 ```bash
 ./codex-bg component list
@@ -150,7 +150,7 @@ Node、Miniconda、CodexApp 在普通Linux和容器都可选，默认关闭。�
 ./codex-bg component install node --path managed
 ./codex-bg component install miniconda --path managed
 ./codex-bg component install codexapp --password-file /private/password --port 8214
-# 密码留空：首次生成默认密码；复用现有 CodexApp 时 --configure 明确配置受管启动
+# 密码留空：首次生成默认密码；复用现有 CodexApp 时 --configure 明确设置为由本工具启动
 ./codex-bg component install codexapp --configure --port 8214
 # 若明确允许同时补装私有Node：再加 --with-node
 ./codex-bg component configure codexapp --password-file /private/password --port 8214
@@ -161,13 +161,13 @@ Node/Conda新安装提供shell集成开关，默认开启；`--no-shell`关闭�
 
 复用环境只解除本工具引用，不删除其目录，不擅自升级或切换外部默认版本。Node出现用户新增global包、Conda有用户环境时，整目录删除会被阻止。组件安装失败保留可诊断状态，不误报成功；Node/Conda/CodexApp暂采用明确卸载后重装的版本维护方式，不提供原位升级。
 
-受管组件目录属于安装器，不应用来保存项目或任意私人文件；保护检查覆盖常规Node全局包和Conda环境/base修改，不能识别所有任意文件的用途。
+本工具安装的组件目录属于安装器，不应用来保存项目或任意私人文件；保护检查覆盖常规Node全局包和Conda环境/base修改，不能识别所有任意文件的用途。
 
-CodexApp 普通Linux使用独立 `codex-bg-codexapp.service`，容器由统一启动流程管理。复用已有程序也可以配置受管启动，但已有外部进程不会被自动终止或收编；它有自己的Node/npm、端口、密码及HTTP检查。CodexApp错误不使核心后台停机。
+CodexApp 普通Linux使用独立 `codex-bg-codexapp.service`，容器由统一启动流程管理。复用已有程序也可以设置为由本工具启动，但已有外部进程不会被自动终止或收编；它有自己的Node/npm、端口、密码及HTTP检查。CodexApp错误不使核心后台停机。
 
 CodexApp 的 npm 版本通过 `package.json` 与实际 CLI 入口关联，并使用固定 Node 执行 `--help` 验证启动能力，不要求其支持 `--version`。不会因 NVM 浮动别名失效而忽略已经存在的兼容 Node；复用后保留验证过的 Node 路径。
 
-WebUI 密码文件可留空：已有受管密码时保留，首次创建随机密码，文件权限 `0600`。界面显示密码保存路径，不在日志显示密码；默认路径为 `~/.local/share/codex-bg/components/codexapp/password`，复用外部程序时也保存在工具自己的运行目录。显式指定密码文件仍需绝对路径，源文件和外部程序目录不会改动。单独登记外部 CLI 的旧行为仍保留；选择界面安装或 CLI `--configure` 才配置受管启动。
+WebUI 密码文件可留空：默认位置已有密码文件时保留，首次创建随机密码，文件权限 `0600`。界面显示密码保存路径，不在日志显示密码；默认路径为 `~/.local/share/codex-bg/components/codexapp/password`，复用外部程序时也保存在工具自己的运行目录。显式指定密码文件仍需绝对路径，源文件和外部程序目录不会改动。单独登记外部 CLI 的旧行为仍保留；选择界面安装或 CLI `--configure` 才设置为由本工具启动。
 
 apti只记录经它安装的包；卸载不卸载系统包。图标备份集中保存，外部图标变化时停止恢复并保留原件。程序自身下载使用 Go HTTP；官方 Codex 安装脚本及部分组件安装仍需 curl、shell、归档工具，CodexApp 需 Node/npm，系统包操作需要必要权限；它们不是 Go 核心的运行依赖。
 
@@ -189,7 +189,7 @@ codex-background-deploy/
     └── reports/
 ```
 
-实际运行程序、当前配置、绑定、socket/锁、连接标记和受管组件在 `~/.local/share/codex-bg/`；外部复用环境留在原处。systemd unit、容器钩子、扩展入口及shell配置块处于各自必须的位置并记录归属。临时替换文件是跨文件系统原子替换的例外，正常结束立即删除。
+实际运行程序、当前配置、绑定、socket/锁、连接标记和本工具安装的组件在 `~/.local/share/codex-bg/`；外部复用环境留在原处。systemd unit、容器钩子、扩展入口及shell配置块处于各自必须的位置并记录归属。临时替换文件是跨文件系统原子替换的例外，正常结束立即删除。
 
 目录、状态和备份默认仅当前用户可读。日志约2MiB轮换一次；bridge不记录prompt/response正文，Codex原生stderr可能含自身诊断信息。系统自行产生的journal/sudo/apt记录和Codex自身用户数据不是本工具的维护缓存，不能保证清除。
 
@@ -220,4 +220,4 @@ codex-background-deploy/
 
 备份显示来源、用途、大小、时间、路径、校验及引用。普通删除和prune跳过仍用于恢复的材料；强删要求明确选择，写入“恢复材料缺失”状态后才删内容。之后不会假称能完整恢复，需补齐原件或重新安装扩展才能解除接管。恢复活跃扩展备份会同步解除其根目录接管，避免立即被自动重写。
 
-卸载先恢复入口，再停止后台、删除受管运行文件。恢复冲突时保留依赖。维护资料不会随核心卸载隐式删除，最后可在安装器目录统一查看/清理。
+卸载先恢复入口，再停止后台、删除本工具创建的运行文件。恢复冲突时保留依赖。维护资料不会随核心卸载隐式删除，最后可在安装器目录统一查看/清理。

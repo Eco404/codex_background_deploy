@@ -297,7 +297,7 @@ func run(ctx context.Context, args []string) error {
 		if dry {
 			return errors.New("record-socket-owner 不支持 --dry-run；不会写入登记")
 		}
-		if !confirm(yes, "验证并登记当前受管后台的 socket 归属，不重启服务？") {
+		if !confirm(yes, "验证并登记本工具当前后台的 socket 归属，不重启服务？") {
 			return nil
 		}
 		return a.RecordRuntimeSocketOwnership()
@@ -313,7 +313,7 @@ func run(ctx context.Context, args []string) error {
 		if opt.CodexVersion != "" {
 			fmt.Println(network.Summary())
 		}
-		if !confirm(yes, "更新受管程序；空闲时切换，--force允许中断任务。") {
+		if !confirm(yes, "更新本工具及由它安装的 Codex CLI；空闲时切换，--force允许中断任务。") {
 			return nil
 		}
 		if waitIdle > 0 {

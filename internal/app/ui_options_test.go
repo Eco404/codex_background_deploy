@@ -206,7 +206,7 @@ func TestUIBlankCodexAppPasswordAcceptedWithoutMutation(t *testing.T) {
 		t.Fatal("blank password did not use default")
 	}
 	m.onInput(m, "")
-	uiChooseTest(t, m, "将受管 Node 依赖加入计划")
+	uiChooseTest(t, m, "同时安装 Node")
 	if !strings.Contains(m.detail, "密码文件：") || m.screen != "confirm" {
 		t.Fatal("default credential path missing from preview")
 	}
@@ -280,7 +280,7 @@ func TestUIRegisteredNodeOverridesOtherDetectedCandidates(t *testing.T) {
 		t.Fatal("other detected Node bypassed planned incompatible runtime")
 	}
 	m.componentConfirm()
-	uiChooseTest(t, m, "将受管 Node 依赖")
+	uiChooseTest(t, m, "同时安装 Node")
 	if hasString(m.options.Components, "node") || !m.options.ComponentOptions["codexapp"].InstallNode {
 		t.Fatal("incompatible plan not replaced")
 	}

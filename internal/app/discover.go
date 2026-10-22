@@ -270,7 +270,7 @@ func (a *App) Discover(ctx context.Context) (Inventory, error) {
 		}
 		if loc.kind == "codex" && loc.source == "extension bundled CLI" {
 			candidate.Compatible = false
-			candidate.Reason = "此入口将被接管且可能随扩展升级删除；请选择独立CLI或安装受管版本"
+			candidate.Reason = "此入口将被接管且可能随扩展升级删除；请选择独立的 Codex CLI，或通过本工具单独安装一份"
 		}
 		inv.Candidates[loc.kind] = append(inv.Candidates[loc.kind], candidate)
 	}

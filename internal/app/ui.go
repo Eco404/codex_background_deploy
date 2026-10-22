@@ -206,10 +206,10 @@ func (m *uiModel) deploymentMenu() {
 				if m.app.S.Codex.Source != "managed" {
 					return m.updateChoice("更新工具到当前安装包；继续复用现有 Codex", "")
 				}
-				return m.ask("受管 Codex 目标版本（留空仅更新工具到当前安装包）", func(m *uiModel, s string) tea.Cmd {
+				return m.ask("本工具安装的 Codex CLI 目标版本（留空仅更新工具到当前安装包）", func(m *uiModel, s string) tea.Cmd {
 					description := "更新工具到当前安装包"
 					if s != "" {
-						description += "，并更新受管 Codex 至 " + s
+						description += "，并更新本工具安装的 Codex CLI 至 " + s
 					}
 					return m.withNetwork(func(m *uiModel) tea.Cmd {
 						return m.updateChoice(description+"\n"+m.app.Network.Summary(), s)
@@ -296,7 +296,7 @@ func (m *uiModel) maintenanceMenu() {
 	}
 	if hasPending(m.app.P.Data) {
 		items = append(items, m.item("恢复未完成事务", func(m *uiModel) tea.Cmd {
-			return m.confirm("按事务记录恢复中断前的受管资源", false, func() tea.Msg {
+			return m.confirm("按操作记录将本工具管理的文件和服务恢复到中断前的状态", false, func() tea.Msg {
 				if m.actions.Recover == nil {
 					return unavailable()
 				}
@@ -485,7 +485,7 @@ func (m *uiModel) codexMenu() {
 			m.backendMenu()
 			return nil
 		})
-	}), m.item("安装受管 Codex CLI", func(m *uiModel) tea.Cmd {
+	}), m.item("安装 Codex CLI", func(m *uiModel) tea.Cmd {
 		return m.ask("Codex CLI 版本（空白为默认版本）", func(m *uiModel, s string) tea.Cmd {
 			m.options.CodexPath = "managed"
 			m.options.CodexVersion = s
@@ -809,7 +809,7 @@ func (m *uiModel) componentCandidates() {
 			}
 			return m.componentConfirm()
 		})
-	}), m.item("安装受管版本", func(m *uiModel) tea.Cmd {
+	}), m.item("单独安装一份", func(m *uiModel) tea.Cmd {
 		return m.ask("版本（留空使用默认）", func(m *uiModel, s string) tea.Cmd {
 			m.componentOptions.Version = s
 			m.componentOptions.Path = "managed"
@@ -846,7 +846,7 @@ func (m *uiModel) componentConfirm() tea.Cmd {
 			return nil
 		}
 		m.menu("CodexApp · 缺少 Node >=20 与同目录 npm", uiShow((*uiModel).componentCandidates),
-			m.item("将受管 Node 依赖加入计划（替换不兼容的 Node 选择，确认后安装）", func(m *uiModel) tea.Cmd {
+			m.item("同时安装 Node（替换不兼容的 Node 选择，确认后安装）", func(m *uiModel) tea.Cmd {
 				if m.componentForInstall {
 					kept := []string{}
 					for _, name := range m.options.Components {
@@ -881,7 +881,7 @@ func (m *uiModel) componentConfirm() tea.Cmd {
 		if m.componentOptions.ShellIntegration {
 			mark = "[x] "
 		}
-		m.menu("组件 · shell 集成", uiShow((*uiModel).componentCandidates), m.item(mark+"为交互 shell 添加受管初始化（默认开启）", func(m *uiModel) tea.Cmd {
+		m.menu("组件 · shell 集成", uiShow((*uiModel).componentCandidates), m.item(mark+"为交互 shell 添加本工具的初始化配置（默认开启）", func(m *uiModel) tea.Cmd {
 			m.componentOptions.ShellIntegration = !m.componentOptions.ShellIntegration
 			return m.componentConfirm()
 		}), m.item("继续预览", func(m *uiModel) tea.Cmd { return m.finishComponentOptions() }))
@@ -946,7 +946,7 @@ func (m *uiModel) finishComponentOptions() tea.Cmd {
 	}
 	name, action, opts := m.component, m.componentAction, m.componentOptions
 	next := func(m *uiModel) tea.Cmd {
-		detail := fmt.Sprintf("组件 %s · %s\n路径：%s\n版本：%s\n端口：%s\nshell 集成：%v\n安装受管 Node 依赖：%v", name, action, opts.Path, opts.Version, opts.Port, opts.ShellIntegration, opts.InstallNode)
+		detail := fmt.Sprintf("组件 %s · %s\n路径：%s\n版本：%s\n端口：%s\nshell 集成：%v\n同时安装 Node：%v", name, action, opts.Path, opts.Version, opts.Port, opts.ShellIntegration, opts.InstallNode)
 		if name == "marketplace" {
 			detail = "组件 微软官方插件源 (marketplace) · " + action
 			target := m.inventory.CodeServerProduct

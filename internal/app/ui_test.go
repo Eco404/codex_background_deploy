@@ -124,7 +124,7 @@ func TestUIWizardBackPreservesSelectionAndDropsUnfinishedComponent(t *testing.T)
 	uiChooseTest(t, m, "复用")
 	uiChooseTest(t, m, "systemd")
 	uiChooseTest(t, m, "[ ] node")
-	uiChooseTest(t, m, "安装受管版本")
+	uiChooseTest(t, m, "单独安装一份")
 	m.input = "22.1.0"
 	uiKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 	uiKey(t, m, tea.KeyMsg{Type: tea.KeyEsc}) // shell integration -> candidate
@@ -250,11 +250,11 @@ func TestUICancelledComponentDraftDoesNotLeakIntoNextAction(t *testing.T) {
 	m.components()
 	uiChooseTest(t, m, "codexapp")
 	uiChooseTest(t, m, "安装 / 复用")
-	uiChooseTest(t, m, "安装受管版本")
+	uiChooseTest(t, m, "单独安装一份")
 	m.onInput(m, "0.1.90")
 	m.onInput(m, "/password")
 	m.onInput(m, "8214")
-	uiChooseTest(t, m, "将受管 Node 依赖加入计划")
+	uiChooseTest(t, m, "同时安装 Node")
 	if !m.componentOptions.InstallNode {
 		t.Fatal("dependency not in draft")
 	}
