@@ -474,8 +474,8 @@ func (m *uiModel) codexMenu() {
 			return nil
 		}))
 	}
-	items = append(items, m.item("指定现有 Codex 路径", func(m *uiModel) tea.Cmd {
-		return m.ask("Codex 绝对路径", func(m *uiModel, s string) tea.Cmd {
+	items = append(items, m.item("指定现有 Codex CLI 路径", func(m *uiModel) tea.Cmd {
+		return m.ask("Codex CLI 绝对路径", func(m *uiModel, s string) tea.Cmd {
 			if !strings.HasPrefix(s, "/") {
 				m.err = fmt.Errorf("请输入绝对路径")
 				return nil
@@ -485,15 +485,15 @@ func (m *uiModel) codexMenu() {
 			m.backendMenu()
 			return nil
 		})
-	}), m.item("安装受管 Codex", func(m *uiModel) tea.Cmd {
-		return m.ask("Codex 版本（空白为默认版本）", func(m *uiModel, s string) tea.Cmd {
+	}), m.item("安装受管 Codex CLI", func(m *uiModel) tea.Cmd {
+		return m.ask("Codex CLI 版本（空白为默认版本）", func(m *uiModel, s string) tea.Cmd {
 			m.options.CodexPath = "managed"
 			m.options.CodexVersion = s
 			m.backendMenu()
 			return nil
 		})
 	}))
-	m.menu(m.deploymentKind()+" · Codex 运行时（优先复用兼容候选）", uiShow((*uiModel).rootMenu), items...)
+	m.menu(m.deploymentKind()+" · Codex CLI 运行时（优先复用兼容候选）", uiShow((*uiModel).rootMenu), items...)
 }
 func (m *uiModel) backendMenu() {
 	items := []uiItem{}

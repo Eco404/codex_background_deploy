@@ -73,7 +73,7 @@ def scenario(name, width, cancel=None):
             send(b"\r", "安装后台")
             send(b"\r", "/fixture/extensions")
             send(b"\r", "[x]")
-            send(b"\x1b[B\x1b[B\r", "Codex 运行时")
+            send(b"\x1b[B\x1b[B\r", "Codex CLI 运行时")
             send(b"\r", "systemd 用户服务")
             send(b"\r", "预览并确认")
             send(b"\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r", "使用官方源")
