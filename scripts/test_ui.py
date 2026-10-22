@@ -87,6 +87,8 @@ def scenario(name, width, cancel=None):
                 os.kill(pid, signal.SIGTERM)
             else:
                 expect("安装操作完成")
+                assert "OUTPUT-TAIL" in transcript[-1], "completion hid the final output"
+                send(b"\r", "已安装")
                 os.write(fd, b"q")
             wait_exit()
             assert (base / "worker-finished").exists(), "UI exited before worker completed"
@@ -95,8 +97,10 @@ def scenario(name, width, cancel=None):
             assert ("取消清理已完成" in log) == (cancel is not None)
             assert "步骤 4/4" in log if cancel is None else "步骤 4/4" not in log
             assert not (base / "runtime/state.json").exists()
+            assert (base / "inventory-count").read_text() == ("2" if cancel is None else "1")
             return {"name": name, "width": width, "passed": True, "workerFinishedBeforeExit": True,
-                    "capturedLog": True, "noDeployment": True}, "".join(transcript)
+                    "capturedLog": True, "noDeployment": True,
+                    "completionTailAndHomeRefresh": cancel is None}, "".join(transcript)
         finally:
             os.close(fd)
             try:

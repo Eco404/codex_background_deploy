@@ -60,7 +60,7 @@ func TestUIUnavailableCoreActionsCannotBeSelected(t *testing.T) {
 	called := false
 	m := &uiModel{app: &App{}, actions: UIActions{Repair: func(context.Context) error { called = true; return nil }}}
 	m.maintenanceMenu()
-	for _, label := range []string{"后台服务", "修复受管扩展入口"} {
+	for _, label := range []string{"后台服务", "修复 Codex 插件后台连接"} {
 		item := uiFind(t, m, label)
 		if item.disabled == "" {
 			t.Fatalf("uninstalled action enabled: %s", label)
@@ -145,7 +145,7 @@ func TestUIPendingTransactionAndMissingDataDisableMutations(t *testing.T) {
 	}
 	discoveryFixture(t, filepath.Join(m.app.P.Data, "transactions/active.json"), `{}`)
 	m.maintenanceMenu()
-	if uiFind(t, m, "修复受管").disabled == "" || uiFind(t, m, "恢复未完成事务").disabled != "" {
+	if uiFind(t, m, "修复 Codex 插件后台连接").disabled == "" || uiFind(t, m, "恢复未完成事务").disabled != "" {
 		t.Fatal("pending transaction not reflected")
 	}
 }
@@ -343,13 +343,21 @@ func TestUIProgressPTYHelper(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(a.P.Data, "logs"), 0700); err != nil {
 		t.Fatal(err)
 	}
+	refreshes := 0
 	actions := UIActions{
 		Inventory: func(context.Context) (Inventory, error) {
+			refreshes++
+			if err := os.WriteFile(filepath.Join(root, "inventory-count"), []byte(fmt.Sprint(refreshes)), 0600); err != nil {
+				return Inventory{}, err
+			}
 			return Inventory{Systemd: true, Extensions: []Extension{{Root: "/fixture/extensions"}}, Candidates: map[string][]Candidate{"codex": {{Path: "/fixture/codex", Compatible: true}}}}, nil
 		},
 		Install: func(ctx context.Context, opt InstallOptions) error {
 			defer func() { _ = os.WriteFile(filepath.Join(root, "worker-finished"), []byte("finished"), 0600) }()
 			for i := 1; i <= 4; i++ {
+				for line := 0; line < 20; line++ {
+					fmt.Fprintf(a.Out, "输出 %d-%02d %s\n", i, line, strings.Repeat("较长路径/", 10))
+				}
 				fmt.Fprintf(a.Out, "步骤 %d/4 · 验证安装输出 %s\n", i, strings.Repeat("长路径/", 10))
 				select {
 				case <-ctx.Done():
@@ -359,6 +367,8 @@ func TestUIProgressPTYHelper(t *testing.T) {
 				case <-time.After(300 * time.Millisecond):
 				}
 			}
+			fmt.Fprintln(a.Out, "OUTPUT-TAIL")
+			a.S.Installed, a.S.Backend = true, "systemd"
 			return nil
 		},
 	}

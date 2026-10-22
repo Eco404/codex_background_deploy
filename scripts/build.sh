@@ -17,6 +17,7 @@ for arch in amd64 arm64; do
   trap 'rm -rf -- "$stage"' EXIT
   mkdir -p "$stage/codex-background-deploy/dist"
   cp install.sh README.md "$stage/codex-background-deploy/"
+  cp -R docs "$stage/codex-background-deploy/"
   cp "dist/codex-bg-linux-$arch" "$stage/codex-background-deploy/codex-bg"
   cp "dist/codex-bg-linux-$arch" dist/SHA256SUMS "$stage/codex-background-deploy/dist/"
   tar -czf "dist/codex-background-deploy-linux-$arch.tar.gz" -C "$stage" codex-background-deploy

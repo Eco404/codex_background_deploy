@@ -69,6 +69,7 @@ func (m *uiModel) startBusy(stage string) {
 	m.busy = true
 	m.started = time.Now()
 	m.scroll = 0
+	m.manualScroll = false
 	if m.progress != nil {
 		m.progress.reset()
 		_, _ = m.progress.Write([]byte(stage + "\n"))

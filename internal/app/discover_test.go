@@ -350,7 +350,7 @@ func TestUIRepairUsesRepairCallbackAndManagedSelectionIsExplicit(t *testing.T) {
 	m.app.P.Data = t.TempDir()
 	m.home()
 	uiChooseTest(t, m, "运行与维护")
-	uiChooseTest(t, m, "修复受管扩展入口")
+	uiChooseTest(t, m, "修复 Codex 插件后台连接")
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if cmd == nil {
 		t.Fatal("repair command missing")

@@ -16,11 +16,12 @@ import (
 )
 
 type uiResult struct {
-	text      string
-	err       error
-	inventory *Inventory
-	backups   []Backup
-	resume    uiRoute
+	text               string
+	err                error
+	inventory          *Inventory
+	backups            []Backup
+	resume             uiRoute
+	deploymentComplete bool
 }
 type uiCancelMsg struct{}
 type uiRoute func(*uiModel) tea.Cmd
@@ -44,6 +45,8 @@ type uiPage struct {
 	err                                            error
 	onInput                                        func(*uiModel, string) tea.Cmd
 	backTo, refreshTo                              uiRoute
+	resultOutput                                   string
+	deploymentComplete                             bool
 }
 type uiModel struct {
 	uiPage
@@ -183,7 +186,7 @@ func (m *uiModel) deploymentMenu() {
 			return nil
 		}))
 	} else {
-		note = "核心已安装。可在此管理组件和版本；检查服务或修复扩展入口请进入「运行与维护」。"
+		note = "核心已安装。可在此管理组件和版本；检查服务或修复 Codex 插件后台连接请进入「运行与维护」。"
 	}
 	items = append(items, m.item("可选组件", uiShow((*uiModel).components)))
 	items = append(items, m.item("下载设置 · 镜像源与代理", func(m *uiModel) tea.Cmd {
@@ -225,7 +228,7 @@ func (m *uiModel) deploymentMenu() {
 				})
 			}),
 			m.choice("卸载核心", uninstallReason, func(m *uiModel) tea.Cmd {
-				return m.forceChoice("卸载核心并恢复受管入口", func(force bool) tea.Msg {
+				return m.forceChoice("卸载核心并恢复 Codex 插件原有启动方式", func(force bool) tea.Msg {
 					if m.actions.Uninstall == nil {
 						return unavailable()
 					}
@@ -259,12 +262,12 @@ func (m *uiModel) maintenanceMenu() {
 			return ""
 		}(), uiShow((*uiModel).serviceMenu)),
 		m.item("只读诊断", func(m *uiModel) tea.Cmd { return m.readText(m.actions.Diagnose) }),
-		m.choice("修复受管扩展入口", m.coreBlock(), func(m *uiModel) tea.Cmd {
-			return m.confirm("重新检查并修复已选择扩展目录中的受管入口", false, func() tea.Msg {
+		m.choice("修复 Codex 插件后台连接", m.coreBlock(), func(m *uiModel) tea.Cmd {
+			return m.confirm("检查已选择的 Codex 插件，让插件继续使用后台服务；必要时恢复后台连接所需的启动文件。", false, func() tea.Msg {
 				if m.actions.Repair == nil {
 					return unavailable()
 				}
-				return uiResult{err: m.actions.Repair(m.ctx), text: "入口修复完成"}
+				return uiResult{err: m.actions.Repair(m.ctx), text: "Codex 插件后台连接配置修复完成；实际连接请在 IDE 中验证"}
 			})
 		}),
 	}
@@ -657,7 +660,8 @@ func (m *uiModel) installComponents() {
 				if fn == nil {
 					return unavailable()
 				}
-				return uiResult{err: fn(m.ctx, opts), text: m.deploymentKind() + "操作完成；请检查扩展连接"}
+				err := fn(m.ctx, opts)
+				return uiResult{err: err, text: m.deploymentKind() + "操作完成；请检查扩展连接", deploymentComplete: err == nil}
 			}
 			if m.migrate && m.actions.PreviewMigration != nil {
 				m.startBusy("正在检查旧部署、关联服务和活跃任务")
@@ -1200,14 +1204,19 @@ func (m *uiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = "result"
 		m.backTo = (*uiModel).leaveResult
 		m.detail = msg.text
-		output := ""
-		if m.progress != nil && strings.TrimSpace(m.progress.snapshot()) != "" {
-			output = "\n\n操作输出：\n" + m.progress.snapshot()
-			m.detail += output
+		m.scroll, m.manualScroll = 0, false
+		m.resultOutput = ""
+		if m.progress != nil {
+			m.resultOutput = strings.TrimSpace(m.progress.snapshot())
+		}
+		m.deploymentComplete = msg.deploymentComplete && msg.err == nil
+		if m.deploymentComplete {
+			m.resultTo = uiShow((*uiModel).home)
+			m.refreshNeeded = true
 		}
 		m.pending = nil
 		if msg.err != nil {
-			m.detail = "操作未完成；请根据上方错误修复后重试。" + output
+			m.detail = "操作未完成；请根据上方错误修复后重试。"
 			if msg.resume != nil {
 				m.resultTo = msg.resume
 			}
@@ -1229,6 +1238,10 @@ func (m *uiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if key == "esc" {
 			return m, m.back()
+		}
+		if key == "end" && m.screen == "result" && m.resultOutput != "" {
+			m.manualScroll = false
+			return m, nil
 		}
 		if key == "pgup" || key == "pgdown" {
 			m.manualScroll = true
@@ -1312,7 +1325,7 @@ func (m *uiModel) View() string {
 	if m.busy {
 		return m.progressView()
 	}
-	if m.err != nil {
+	if m.err != nil && m.screen != "result" {
 		b.WriteString(uiError.Render(uiPlain(m.err.Error())) + "\n\n")
 	}
 	footer := ""
@@ -1329,8 +1342,22 @@ func (m *uiModel) View() string {
 			footer = "确认继续？y / n（默认不执行） · Esc 返回"
 		}
 	case "result":
+		if m.resultOutput != "" {
+			b.WriteString("操作输出：\n" + uiPlain(m.resultOutput) + "\n\n")
+		}
+		if m.err != nil {
+			b.WriteString(uiError.Render(uiPlain(m.err.Error())) + "\n\n")
+		}
 		b.WriteString(uiPlain(m.detail))
 		footer = "Enter / Esc 返回所属菜单 · q 退出"
+		if m.deploymentComplete {
+			footer = "Enter / Esc 继续：刷新并返回主界面 · q 退出"
+		}
+		if m.resultOutput != "" {
+			w, _ := m.dimensions()
+			focus = strings.Count(ansi.Hardwrap(b.String(), max(1, w-2), true), "\n")
+			footer += " · End 最新输出"
+		}
 	default:
 		if strings.HasPrefix(m.title, "Codex Background") {
 			status := "未安装"
