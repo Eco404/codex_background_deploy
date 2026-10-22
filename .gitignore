@@ -1,4 +1,7 @@
 /installer-data/
 /codex-bg
-/dist/
+/dist/*
+!/dist/codex-bg-linux-amd64
+!/dist/codex-bg-linux-arm64
+!/dist/SHA256SUMS
 *.test

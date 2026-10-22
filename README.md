@@ -2,6 +2,8 @@
 
 一个 Go 程序管理 Linux 中的 Codex 后台、IDE 接入、可选开发环境和恢复材料。支持 Linux amd64/arm64，systemd 用户服务及有启动钩子的容器。Go 核心不需要 Node、npm、Python 或 whiptail。
 
+仓库的 `dist/` 已包含 Linux x64（amd64）、ARM64 预编译程序及 `SHA256SUMS`。克隆仓库或下载 GitHub 源码 ZIP 并解压后，可直接运行 `./install.sh`：脚本按本机架构校验并复制程序到根目录，然后打开管理界面，无需安装 Go 或设置 `CODEX_BG_DOWNLOAD_BASE`。
+
 ```bash
 ./install.sh        # 打开状态首页，不会自动安装
 ./codex-bg inspect
@@ -271,7 +273,9 @@ go test -c -o installer-data/tmp/ui-tests ./internal/app
 go test ./internal/app -run Marketplace -count=1
 ```
 
-构建缓存、测试临时文件与报告均在installer-data下。发布物在dist含amd64/arm64二进制、SHA256SUMS、各架构完整tar.gz。安装包包含用于迁移来源比较的 v3 controller 原始源码；该副本不作为运行入口。安装包可直接解压运行；下载bootstrap通过 `CODEX_BG_DOWNLOAD_BASE=https://...` 指定真实发布地址，不硬编码未经发布的URL。包内checksum校验防止传输损坏，签名发布流程尚未建立。
+构建缓存、测试临时文件与报告均在installer-data下。`dist/codex-bg-linux-amd64`、`dist/codex-bg-linux-arm64` 和 `dist/SHA256SUMS` 纳入 Git；修改 Go 源码后应运行 `bash scripts/build.sh`，将这三个文件一同提交。根目录的本机 `codex-bg` 副本、完整 tar.gz 安装包及维护资料仍忽略，不重复存入仓库。
+
+构建脚本也生成各架构完整 tar.gz，包含用于迁移来源比较的 v3 controller 原始源码；该副本不作为运行入口。完整安装包可直接解压运行。仅在单独使用 `install.sh`、没有本地程序或 `dist/` 预编译文件时，才需要通过 `CODEX_BG_DOWNLOAD_BASE=https://...` 指定真实下载地址。已有根目录 `codex-bg` 时脚本优先使用它；拉取新版预编译文件后，可移除安装器根目录的该副本，再运行 `./install.sh` 重新校验提取。此操作不删除已部署到运行目录的后台程序，后台版本更新仍通过“更新核心”执行。包内checksum校验防止传输损坏，签名发布流程尚未建立。
 
 隔离测试覆盖Go协议、EOF/握手超时、独立进程组、所有权和备份、迁移失败恢复、环境复用、组件与终端集成、TUI确认流程。端到端脚本用本地假Responses服务验证唯一客户端断开后任务完成、扩展更新自动接管、更新/回退/卸载以及无测试进程残留。
 
