@@ -13,14 +13,13 @@ case "$(uname -m)" in x86_64|amd64) build_host_arch=amd64;; aarch64|arm64) build
 cp "dist/codex-bg-linux-$build_host_arch" codex-bg
 chmod 755 codex-bg
 for arch in amd64 arm64; do
-  stage="installer-data/tmp/package-$arch"
+  stage=$(mktemp -d "installer-data/tmp/package-$arch.XXXXXX")
+  trap 'rm -rf -- "$stage"' EXIT
   mkdir -p "$stage/codex-background-deploy/dist"
-  # Migration validates an installed v3 controller against this saved source.
-  mkdir -p "$stage/codex-background-deploy/legacy/v3/payload"
-  cp legacy/v3/payload/control.sh "$stage/codex-background-deploy/legacy/v3/payload/"
   cp install.sh README.md "$stage/codex-background-deploy/"
   cp "dist/codex-bg-linux-$arch" "$stage/codex-background-deploy/codex-bg"
   cp "dist/codex-bg-linux-$arch" dist/SHA256SUMS "$stage/codex-background-deploy/dist/"
   tar -czf "dist/codex-background-deploy-linux-$arch.tar.gz" -C "$stage" codex-background-deploy
   rm -rf -- "$stage"
+  trap - EXIT
 done

@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,13 @@ import (
 	"regexp"
 	"strings"
 )
+
+// Preserve the reviewed v3 controller as immutable comparison data. Migration
+// executes only the matching controller in the existing installation, never
+// this embedded copy or a reference supplied by the installer directory.
+//
+//go:embed legacydata/v3-control.sh.txt
+var legacyV3Controller []byte
 
 type legacyEntryRecord struct {
 	ex                      Extension
@@ -285,10 +293,9 @@ func (a *App) planMigration(ctx context.Context, opt InstallOptions) (*migration
 	}
 	control := filepath.Join(a.P.Home, ".local/share/codex-background/payload/control.sh")
 	if _, err := os.Stat(filepath.Join(a.P.Home, ".local/share/codex-background/managed-v3")); err == nil {
-		h1, e1 := Hash(filepath.Join(a.P.Installer, "legacy/v3/payload/control.sh"))
-		h2, e2 := Hash(control)
-		if e1 != nil || e2 != nil || h1 != h2 {
-			return nil, errors.New("v3控制器与保存来源不一致；需人工校验后迁移")
+		hash, err := Hash(control)
+		if err != nil || hash != HashBytes(legacyV3Controller) {
+			return nil, errors.New("v3控制器与内置原件不一致或无法读取；需人工校验后迁移")
 		}
 		p.Control = control
 		v3Socket := filepath.Join(a.P.Home, ".local/state/codex-background/app-server.sock")

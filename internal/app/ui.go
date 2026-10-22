@@ -613,11 +613,18 @@ func (m *uiModel) installComponents() {
 		if m.options.Linger {
 			mark = "[x] "
 		}
-		items = append(items, m.item(mark+"启用 linger（注销后继续）", func(m *uiModel) tea.Cmd { m.options.Linger = !m.options.Linger; m.installComponents(); return nil }))
+		items = append(items, m.item(mark+"启用 linger（开机无需登录即可启动，注销后继续运行）", func(m *uiModel) tea.Cmd { m.options.Linger = !m.options.Linger; m.installComponents(); return nil }))
 	}
 	items = append(items, m.item("预览并确认", func(m *uiModel) tea.Cmd {
 		return m.withNetwork(func(m *uiModel) tea.Cmd {
-			description := fmt.Sprintf("操作：%s\n方式：%s\nCodex：%s 版本：%s\n扩展目录：\n  %s\n可选组件：%v\nlinger：%v", m.deploymentKind(), m.options.Backend, m.options.CodexPath, m.options.CodexVersion, strings.Join(m.options.Roots, "\n  "), m.options.Components, m.options.Linger)
+			description := fmt.Sprintf("操作：%s\n方式：%s\nCodex：%s 版本：%s\n扩展目录：\n  %s\n可选组件：%v", m.deploymentKind(), m.options.Backend, m.options.CodexPath, m.options.CodexVersion, strings.Join(m.options.Roots, "\n  "), m.options.Components)
+			if m.options.Backend == "systemd" {
+				if m.options.Linger {
+					description += "\nlinger：启用（开机无需登录即可启动，注销后继续运行）"
+				} else {
+					description += "\nlinger：不启用（保留系统现有设置；未开启时通常随用户登录启动）"
+				}
+			}
 			if m.options.NoAutoRestart {
 				description += "\n崩溃后自动重启：关闭；异常退出后需手动启动"
 			} else {

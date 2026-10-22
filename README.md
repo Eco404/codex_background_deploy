@@ -133,7 +133,7 @@ CLI 默认使用官方源并沿用代理环境；修改仍需确认或显式 `--
 ./codex-bg uninstall
 ```
 
-系统服务名为 `codex-bg.service`；容器创建 `$ENTRYPOINTD/codex-bg.sh`（也可 `--entrypoint-dir`）。保留原镜像entrypoint。systemd注销后持续运行可选 `--linger`。容器模式要求用户目录、运行目录、维护目录和启动钩子正确持久化；容器内无法替宿主保证挂载配置。
+systemd 用户服务名为 `codex-bg.service`；选择 systemd 部署即注册用户服务。向导中的“启用 linger（开机无需登录即可启动，注销后继续运行）”对应 `--linger`，默认不选；未勾选时保留系统现有设置，原本未开启 linger 的用户通常需登录后才启动服务。容器创建 `$ENTRYPOINTD/codex-bg.sh`（也可 `--entrypoint-dir`），保留原镜像 entrypoint；容器模式要求用户目录、运行目录、维护目录和启动钩子正确持久化，容器内无法替宿主保证挂载配置。
 
 迁移、升级、停止和卸载默认检查忙碌状态；不能确认空闲时也拒绝隐式中断。`--force` 是明确中断选择，不跳过来源、恢复材料和依赖检查。修改CLI命令需要交互确认，自动化用 `--yes`；预览用 `--dry-run`（安装/迁移/组件）。普通CLI、help、schema等由桥接入口转发真实Codex，未知的窗口级app-server启动配置不能改变共享后台的配置。
 
@@ -252,7 +252,7 @@ codex-background-deploy/
 
 ## 构建与验证
 
-源码可用Go >=1.24构建，无需在用户机器安装Go。仓库保留上一版源码于 `legacy/v3`，不是当前运行入口。
+源码可用Go >=1.24构建，无需在用户机器安装Go。旧项目已从当前目录移除，完整源码保留在 Git 历史。迁移所需的少量原件保存在 [`internal/app/legacydata`](internal/app/legacydata/README.md)，通过 `go:embed` 编入程序；发布包无需携带 `legacy/`。v3 迁移仍严格校验目标控制器，修改过或缺失的控制器会阻止迁移；目标机器上的旧运行文件仍须保留，以便停止旧后台和失败恢复。
 
 ```bash
 . scripts/go-env.sh
@@ -275,7 +275,7 @@ go test ./internal/app -run Marketplace -count=1
 
 构建缓存、测试临时文件与报告均在installer-data下。`dist/codex-bg-linux-amd64`、`dist/codex-bg-linux-arm64` 和 `dist/SHA256SUMS` 纳入 Git；修改 Go 源码后应运行 `bash scripts/build.sh`，将这三个文件一同提交。根目录的本机 `codex-bg` 副本、完整 tar.gz 安装包及维护资料仍忽略，不重复存入仓库。
 
-构建脚本也生成各架构完整 tar.gz，包含用于迁移来源比较的 v3 controller 原始源码；该副本不作为运行入口。完整安装包可直接解压运行。仅在单独使用 `install.sh`、没有本地程序或 `dist/` 预编译文件时，才需要通过 `CODEX_BG_DOWNLOAD_BASE=https://...` 指定真实下载地址。已有根目录 `codex-bg` 时脚本优先使用它；拉取新版预编译文件后，可移除安装器根目录的该副本，再运行 `./install.sh` 重新校验提取。此操作不删除已部署到运行目录的后台程序，后台版本更新仍通过“更新核心”执行。包内checksum校验防止传输损坏，签名发布流程尚未建立。
+构建脚本也生成各架构完整 tar.gz，迁移校验原件已内嵌于可执行文件，包内不再附带旧项目源码。完整安装包可直接解压运行。仅在单独使用 `install.sh`、没有本地程序或 `dist/` 预编译文件时，才需要通过 `CODEX_BG_DOWNLOAD_BASE=https://...` 指定真实下载地址。已有根目录 `codex-bg` 时脚本优先使用它；拉取新版预编译文件后，可移除安装器根目录的该副本，再运行 `./install.sh` 重新校验提取。此操作不删除已部署到运行目录的后台程序，后台版本更新仍通过“更新核心”执行。包内checksum校验防止传输损坏，签名发布流程尚未建立。
 
 隔离测试覆盖Go协议、EOF/握手超时、独立进程组、所有权和备份、迁移失败恢复、环境复用、组件与终端集成、TUI确认流程。端到端脚本用本地假Responses服务验证唯一客户端断开后任务完成、扩展更新自动接管、更新/回退/卸载以及无测试进程残留。
 

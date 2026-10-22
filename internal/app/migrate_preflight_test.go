@@ -418,17 +418,12 @@ func TestMigrationChangedLegacyEntryDoesNotOverwriteExternalChanges(t *testing.T
 }
 
 func TestMigrationV3SystemdUsesOnlyUnitLifecycle(t *testing.T) {
-	controller, err := os.ReadFile("../../legacy/v3/payload/control.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, fail := range []bool{false, true} {
 		t.Run(fmt.Sprintf("fail-new-start=%v", fail), func(t *testing.T) {
 			a, opt, _ := migrationPreflightApp(t)
 			a.P.Socket = runtimeFixture(t, runtimeResponder("idle"))
 			control := filepath.Join(a.P.Home, ".local/share/codex-background/payload/control.sh")
-			engineFile(t, control, string(controller))
-			engineFile(t, filepath.Join(a.P.Installer, "legacy/v3/payload/control.sh"), string(controller))
+			engineFile(t, control, string(legacyV3Controller))
 			engineFile(t, filepath.Join(a.P.Home, ".local/share/codex-background/managed-v3"), "managed\n")
 			v3Hook := filepath.Join(a.P.Home, "entrypoint.d/20-codex-background.sh")
 			engineFile(t, v3Hook, "#!/bin/sh\n# codex-background managed startup hook\n/bin/bash "+control+" start\n")
