@@ -297,7 +297,7 @@ func run(ctx context.Context, args []string) error {
 		if dry {
 			return errors.New("record-socket-owner 不支持 --dry-run；不会写入登记")
 		}
-		if !confirm(yes, "验证并登记本工具当前后台的 socket 归属，不重启服务？") {
+		if !confirm(yes, "是否验证并登记本工具当前后台的 socket 归属？") {
 			return nil
 		}
 		return a.RecordRuntimeSocketOwnership()
